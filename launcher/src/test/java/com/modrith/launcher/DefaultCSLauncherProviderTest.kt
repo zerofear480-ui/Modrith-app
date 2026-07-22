@@ -112,10 +112,90 @@ class DefaultCSLauncherProviderTest {
             val missing = info.warnings.filter {
                 it.code == LauncherWarningCode.MISSING_DIRECTORY
             }
-            assertEquals(6, missing.size)
+            assertEquals(8, missing.size)
             assertTrue(info.capabilities.compatible)
             assertEquals(setOf(LauncherDirectory.VERSIONS), info.detectedDirectories)
             assertEquals(0, readOnly.mutationCalls.get())
+        }
+
+    @Test
+    fun currentCSLauncherRootDerivesInstancesWhenLegacyProfilesAreMissing() =
+        withLauncherRoot { _, provider ->
+            provider.createDirectory(StoragePath("assets")).success()
+            provider.createDirectory(StoragePath("libraries")).success()
+            provider.createDirectory(StoragePath("versions")).success()
+            writeProfiles(provider, """{"profiles":{}}""")
+            createVersion(
+                provider,
+                "fabric-loader-0.16.10-1.21.1",
+                versionJson(
+                    "fabric-loader-0.16.10-1.21.1",
+                    inheritsFrom = "1.21.1",
+                    library = "net.fabricmc:fabric-loader:0.16.10",
+                ),
+            )
+
+            val launcherProvider = DefaultCSLauncherProvider()
+            val readOnly = MutationDetectingProvider(provider)
+            val info = launcherProvider.inspect(readOnly).success()
+            val rescanned = launcherProvider.inspect(readOnly).success()
+
+            assertTrue(info.capabilities.compatible)
+            assertEquals(
+                setOf(
+                    LauncherDirectory.ASSETS,
+                    LauncherDirectory.LIBRARIES,
+                    LauncherDirectory.VERSIONS,
+                ),
+                info.detectedDirectories,
+            )
+            assertEquals(1, info.instances.size)
+            assertEquals(
+                "cs-launcher-v2-version:fabric-loader-0.16.10-1.21.1",
+                info.instances.single().profileId,
+            )
+            assertEquals(
+                "fabric-loader-0.16.10-1.21.1",
+                info.instances.single().lastVersionId,
+            )
+            assertEquals(null, info.instances.single().gameDirectory)
+            assertEquals(info.instances, rescanned.instances)
+            assertEquals(0, readOnly.mutationCalls.get())
+        }
+
+    @Test
+    fun legacyProfilesRemainCompatibleWithoutCurrentSharedDirectories() =
+        withLauncherRoot { _, provider ->
+            provider.createDirectory(StoragePath("versions")).success()
+            writeProfiles(
+                provider,
+                """
+                {
+                  "profiles": {
+                    "fabric": {
+                      "name": "Fabric",
+                      "lastVersionId": "fabric-loader-0.16.10-1.21.1"
+                    }
+                  }
+                }
+                """,
+            )
+            createVersion(
+                provider,
+                "fabric-loader-0.16.10-1.21.1",
+                versionJson(
+                    "fabric-loader-0.16.10-1.21.1",
+                    inheritsFrom = "1.21.1",
+                    library = "net.fabricmc:fabric-loader:0.16.10",
+                ),
+            )
+
+            val info = DefaultCSLauncherProvider()
+                .inspect(MutationDetectingProvider(provider))
+                .success()
+
+            assertTrue(info.capabilities.compatible)
+            assertEquals(listOf("fabric"), info.instances.map(LauncherInstance::profileId))
         }
 
     @Test

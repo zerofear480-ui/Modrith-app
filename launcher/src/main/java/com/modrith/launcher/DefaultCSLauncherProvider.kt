@@ -594,6 +594,19 @@ class DefaultLauncherValidator : LauncherValidator {
                 profileType = profile.profileType,
             )
         }
+        if (instances.isEmpty() && snapshot.isCurrentCSLauncherRoot()) {
+            snapshot.versions
+                .distinctBy(LauncherVersion::id)
+                .forEach { version ->
+                    instances += LauncherInstance(
+                        profileId = "$VERSION_INSTANCE_PREFIX${version.id}",
+                        name = version.id,
+                        lastVersionId = version.id,
+                        gameDirectory = null,
+                        profileType = VERSION_DERIVED_PROFILE_TYPE,
+                    )
+                }
+        }
 
         val structureErrors = errors.any {
             it.code in setOf(
@@ -645,4 +658,17 @@ class DefaultLauncherValidator : LauncherValidator {
 
     private fun StoragePath.child(name: String): StoragePath =
         if (isRoot) StoragePath(name) else StoragePath("$value/$name")
+
+    private fun LauncherScanSnapshot.isCurrentCSLauncherRoot(): Boolean =
+        profilesFilePresent &&
+            setOf(
+                LauncherDirectory.ASSETS,
+                LauncherDirectory.LIBRARIES,
+                LauncherDirectory.VERSIONS,
+            ).all(detectedDirectories::contains)
+
+    private companion object {
+        const val VERSION_INSTANCE_PREFIX = "cs-launcher-v2-version:"
+        const val VERSION_DERIVED_PROFILE_TYPE = "version"
+    }
 }

@@ -54,6 +54,8 @@ enum class LauncherLoader {
 enum class LauncherDirectory(
     val relativePath: String,
 ) {
+    ASSETS("assets"),
+    LIBRARIES("libraries"),
     MODS("mods"),
     CONFIG("config"),
     RESOURCE_PACKS("resourcepacks"),
