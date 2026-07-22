@@ -12,6 +12,8 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.modrith.ui.home.HomeScreen
+import com.modrith.ui.home.BuildDetails
+import com.modrith.app.BuildConfig
 import com.modrith.ui.install.InstallConfirmationScreen
 import com.modrith.ui.install.InstallErrorScreen
 import com.modrith.ui.install.InstallScreen
@@ -62,6 +64,12 @@ fun ModrithNavigation(
                     navController.navigate(ModrithDestination.Settings.route)
                 },
                 viewModel = installViewModel,
+                buildDetails = BuildDetails(
+                    versionName = BuildConfig.VERSION_NAME,
+                    versionCode = BuildConfig.VERSION_CODE,
+                    gitCommit = BuildConfig.GIT_COMMIT,
+                    builtAtUtc = BuildConfig.BUILD_DATE_UTC,
+                ),
             )
         }
         composable(ModrithDestination.InstallConfirmation.route) {

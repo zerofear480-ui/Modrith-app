@@ -6,6 +6,7 @@ import androidx.room.Room
 import com.modrith.app.install.AndroidInstallWorkflow
 import com.modrith.app.install.PersistentCheckpointRepository
 import com.modrith.app.install.SafLauncherTargetRegistry
+import com.modrith.app.install.TimberLauncherLogger
 import com.modrith.core.di.IoDispatcher
 import com.modrith.downloader.OkHttpDownloadEngine
 import com.modrith.downloader.persistence.DownloadStateDatabase
@@ -118,7 +119,9 @@ object InstallProvidersModule {
 
     @Provides
     @Singleton
-    fun provideLauncherProvider(): LauncherProvider = DefaultCSLauncherProvider()
+    fun provideLauncherProvider(): LauncherProvider = DefaultCSLauncherProvider(
+        logger = TimberLauncherLogger(),
+    )
 
     @Provides
     @Singleton

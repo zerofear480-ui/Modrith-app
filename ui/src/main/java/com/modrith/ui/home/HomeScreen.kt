@@ -5,6 +5,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -33,6 +34,7 @@ import com.modrith.ui.install.InstallViewModel
 fun HomeScreen(
     onOpenSettings: () -> Unit,
     viewModel: InstallViewModel,
+    buildDetails: BuildDetails,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val picker = rememberLauncherForActivityResult(
@@ -125,6 +127,32 @@ fun HomeScreen(
                     }
                 }
             }
+
+            Spacer(modifier = Modifier.weight(1f))
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    text = "Version: ${buildDetails.versionName} (${buildDetails.versionCode})",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = "Commit: ${buildDetails.gitCommit}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = "Built: ${buildDetails.builtAtUtc}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }
+
+data class BuildDetails(
+    val versionName: String,
+    val versionCode: Int,
+    val gitCommit: String,
+    val builtAtUtc: String,
+)

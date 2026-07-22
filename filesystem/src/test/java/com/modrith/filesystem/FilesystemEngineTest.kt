@@ -193,6 +193,30 @@ class FilesystemEngineTest {
         assertArrayEquals("secret".toByteArray(), Files.readAllBytes(outsideFile))
     }
 
+    @Test
+    fun subtreeProviderScopesAllOperationsToResolvedLauncherRoot() =
+        withTempDirectories(1) { (root) ->
+            val base = CacheProvider(root)
+            base.createDirectory(StoragePath(".minecraft/versions")).success()
+            val subtree = SubtreeStorageProvider(base, StoragePath(".minecraft"))
+
+            subtree.replaceFile(StoragePath("mods/example.jar")) {
+                it.write("mod".toByteArray())
+            }.success()
+
+            assertTrue(base.exists(StoragePath(".minecraft/mods/example.jar")).success())
+            assertFalse(base.exists(StoragePath("mods/example.jar")).success())
+            assertEquals(
+                listOf("mods/example.jar"),
+                subtree.list(StoragePath("mods")).success().map { it.path.value },
+            )
+            assertEquals(
+                ".minecraft",
+                base.metadata(StoragePath(".minecraft")).success().path.value,
+            )
+            assertEquals(StoragePath.ROOT, subtree.metadata(StoragePath.ROOT).success().path)
+        }
+
     private fun ByteArray.digest(algorithm: String): String =
         MessageDigest.getInstance(algorithm).digest(this).joinToString("") { "%02x".format(it) }
 

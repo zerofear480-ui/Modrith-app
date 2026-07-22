@@ -4,6 +4,7 @@ import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.provider.DocumentsContract
 import androidx.documentfile.provider.DocumentFile
 import java.io.FileNotFoundException
 import java.io.IOException
@@ -28,11 +29,28 @@ class DocumentTreeProvider(
     }
 
     override val providerId: String = "document-tree"
+    val resolvedTree = ResolvedDocumentTree(
+        selectedTreeUri = treeUri.toString(),
+        treeDocumentId = runCatching {
+            DocumentsContract.getTreeDocumentId(treeUri)
+        }.getOrNull(),
+        rootDocumentUri = root.uri.toString(),
+        rootDisplayName = root.name,
+    )
 
     init {
         require(treeUri.scheme == ContentResolver.SCHEME_CONTENT) {
             "DocumentTreeProvider requires a content URI."
         }
+        logger.info(
+            "storage.tree.resolved",
+            mapOf(
+                "selectedTreeUri" to resolvedTree.selectedTreeUri,
+                "treeDocumentId" to resolvedTree.treeDocumentId,
+                "rootDocumentUri" to resolvedTree.rootDocumentUri,
+                "rootDisplayName" to resolvedTree.rootDisplayName,
+            ),
+        )
     }
 
     fun permission(): TreePermission {

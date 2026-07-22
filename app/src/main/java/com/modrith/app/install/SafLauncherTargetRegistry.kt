@@ -3,6 +3,8 @@ package com.modrith.app.install
 import android.content.Context
 import android.net.Uri
 import com.modrith.filesystem.DocumentTreeProvider
+import com.modrith.filesystem.StoragePath
+import com.modrith.filesystem.SubtreeStorageProvider
 import com.modrith.launcher.LauncherInstance
 import com.modrith.orchestrator.InstallError
 import com.modrith.orchestrator.InstallErrorSource
@@ -12,6 +14,7 @@ import com.modrith.orchestrator.LauncherTargetResult
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
+import timber.log.Timber
 
 @Singleton
 class SafLauncherTargetRegistry @Inject constructor(
@@ -24,13 +27,21 @@ class SafLauncherTargetRegistry @Inject constructor(
 
     fun remember(
         treeUri: String,
+        launcherRoot: StoragePath,
         instances: List<LauncherInstance>,
     ) {
         preferences.edit().apply {
             instances.forEach { instance ->
                 putString(instance.profileId, treeUri)
+                putString(rootKey(instance.profileId), launcherRoot.value)
             }
         }.apply()
+        Timber.tag(TAG).i(
+            "launcher.discovery.target_remembered {selectedTreeUri=%s, launcherRoot=%s, instances=%d}",
+            treeUri,
+            launcherRoot.value.ifEmpty { "<selected-tree>" },
+            instances.size,
+        )
     }
 
     override suspend fun targetFor(instance: LauncherInstance): LauncherTargetResult {
@@ -54,8 +65,23 @@ class SafLauncherTargetRegistry @Inject constructor(
                 "Access to the launcher storage tree was revoked. Select it again.",
             )
         }
-        return LauncherTargetResult.Success(LauncherTarget(provider))
+        val launcherRoot = StoragePath(
+            preferences.getString(rootKey(instance.profileId), null).orEmpty(),
+        )
+        Timber.tag(TAG).i(
+            "launcher.discovery.target_restored {selectedTreeUri=%s, launcherRoot=%s}",
+            rawUri,
+            launcherRoot.value.ifEmpty { "<selected-tree>" },
+        )
+        val targetStorage = if (launcherRoot.isRoot) {
+            provider
+        } else {
+            SubtreeStorageProvider(provider, launcherRoot)
+        }
+        return LauncherTargetResult.Success(LauncherTarget(targetStorage))
     }
+
+    private fun rootKey(profileId: String): String = "$profileId:launcher-root"
 
     private fun failure(
         code: String,
@@ -68,4 +94,8 @@ class SafLauncherTargetRegistry @Inject constructor(
             recoverable = true,
         ),
     )
+
+    private companion object {
+        const val TAG = "LauncherDiscovery"
+    }
 }

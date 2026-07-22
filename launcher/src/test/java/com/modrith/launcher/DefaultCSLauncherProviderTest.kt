@@ -164,6 +164,57 @@ class DefaultCSLauncherProviderTest {
         }
 
     @Test
+    fun discoversMinecraftDirectoryBelowSelectedCSLauncherTree() =
+        withLauncherRoot { _, provider ->
+            val minecraftRoot = StoragePath(".minecraft")
+            provider.createDirectory(minecraftRoot).success()
+            createCurrentRootWithoutProfiles(provider, minecraftRoot)
+            val logger = RecordingLauncherLogger()
+
+            val info = DefaultCSLauncherProvider(logger = logger)
+                .inspect(MutationDetectingProvider(provider))
+                .success()
+
+            assertEquals(minecraftRoot, info.root)
+            assertTrue(info.capabilities.compatible)
+            assertEquals(1, info.instances.size)
+            assertTrue(
+                logger.events.any {
+                    it.event == "launcher.discovery.root_candidate" &&
+                        it.attributes["path"] == "<selected-tree>" &&
+                        it.attributes["hasDotMinecraft"] == true
+                },
+            )
+            assertTrue(
+                logger.events.any {
+                    it.event == "launcher.discovery.candidate_accepted" &&
+                        it.attributes["path"] == ".minecraft"
+                },
+            )
+        }
+
+    @Test
+    fun acceptsSelectedMinecraftDirectoryWithoutLauncherProfiles() =
+        withLauncherRoot { _, provider ->
+            val minecraftRoot = StoragePath(".minecraft")
+            provider.createDirectory(minecraftRoot).success()
+            createCurrentRootWithoutProfiles(provider, minecraftRoot)
+
+            val info = DefaultCSLauncherProvider()
+                .inspect(MutationDetectingProvider(provider), minecraftRoot)
+                .success()
+
+            assertEquals(minecraftRoot, info.root)
+            assertTrue(info.capabilities.compatible)
+            assertFalse(info.capabilities.canReadProfiles)
+            assertEquals(
+                "cs-launcher-v2-version:fabric-loader-0.16.10-1.21.1",
+                info.instances.single().profileId,
+            )
+            assertFalse(info.hasError(LauncherErrorCode.MISSING_PROFILES_FILE))
+        }
+
+    @Test
     fun legacyProfilesRemainCompatibleWithoutCurrentSharedDirectories() =
         withLauncherRoot { _, provider ->
             provider.createDirectory(StoragePath("versions")).success()
@@ -338,12 +389,36 @@ class DefaultCSLauncherProviderTest {
         provider: StorageProvider,
         id: String,
         metadata: String,
+        root: StoragePath = StoragePath.ROOT,
     ) {
-        provider.createDirectory(StoragePath("versions/$id")).success()
-        provider.replaceFile(StoragePath("versions/$id/$id.json"), "application/json") {
+        val versions = root.child("versions")
+        provider.createDirectory(versions.child(id)).success()
+        provider.replaceFile(versions.child(id).child("$id.json"), "application/json") {
             it.write(metadata.toByteArray())
         }.success()
     }
+
+    private suspend fun createCurrentRootWithoutProfiles(
+        provider: StorageProvider,
+        root: StoragePath,
+    ) {
+        provider.createDirectory(root.child("assets")).success()
+        provider.createDirectory(root.child("libraries")).success()
+        provider.createDirectory(root.child("versions")).success()
+        createVersion(
+            provider = provider,
+            id = "fabric-loader-0.16.10-1.21.1",
+            metadata = versionJson(
+                "fabric-loader-0.16.10-1.21.1",
+                inheritsFrom = "1.21.1",
+                library = "net.fabricmc:fabric-loader:0.16.10",
+            ),
+            root = root,
+        )
+    }
+
+    private fun StoragePath.child(name: String): StoragePath =
+        if (isRoot) StoragePath(name) else StoragePath("$value/$name")
 
     private fun versionJson(
         id: String,
@@ -377,6 +452,39 @@ class DefaultCSLauncherProviderTest {
             }
         }
     }
+}
+
+private class RecordingLauncherLogger : LauncherLogger {
+    val events = mutableListOf<Event>()
+
+    override fun debug(event: String, attributes: Map<String, Any?>) {
+        events += Event(event, attributes)
+    }
+
+    override fun info(event: String, attributes: Map<String, Any?>) {
+        events += Event(event, attributes)
+    }
+
+    override fun warn(
+        event: String,
+        attributes: Map<String, Any?>,
+        cause: Throwable?,
+    ) {
+        events += Event(event, attributes)
+    }
+
+    override fun error(
+        event: String,
+        attributes: Map<String, Any?>,
+        cause: Throwable?,
+    ) {
+        events += Event(event, attributes)
+    }
+
+    data class Event(
+        val event: String,
+        val attributes: Map<String, Any?>,
+    )
 }
 
 private class MutationDetectingProvider(

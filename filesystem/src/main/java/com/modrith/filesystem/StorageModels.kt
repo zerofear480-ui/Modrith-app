@@ -48,6 +48,13 @@ data class TreePermission(
     val persisted: Boolean,
 )
 
+data class ResolvedDocumentTree(
+    val selectedTreeUri: String,
+    val treeDocumentId: String?,
+    val rootDocumentUri: String,
+    val rootDisplayName: String?,
+)
+
 enum class StorageHashAlgorithm(
     val jcaName: String,
 ) {

@@ -54,6 +54,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import timber.log.Timber
 
 @Singleton
 class AndroidInstallWorkflow @Inject constructor(
@@ -215,6 +216,10 @@ class AndroidInstallWorkflow @Inject constructor(
 
     override fun selectLauncherTree(uri: String) {
         scope.launch {
+            Timber.tag(LAUNCHER_DISCOVERY_TAG).i(
+                "launcher.discovery.selected_saf_uri {uri=%s}",
+                uri,
+            )
             if (launcherTreeUri != uri) {
                 releasePersistedPermission(launcherTreeUri, read = true, write = true)
             }
@@ -234,6 +239,14 @@ class AndroidInstallWorkflow @Inject constructor(
                 )
                 return@launch
             }
+            Timber.tag(LAUNCHER_DISCOVERY_TAG).i(
+                "launcher.discovery.resolved_document_tree " +
+                    "{selectedTreeUri=%s, treeDocumentId=%s, rootDocumentUri=%s, rootDisplayName=%s}",
+                provider.resolvedTree.selectedTreeUri,
+                provider.resolvedTree.treeDocumentId,
+                provider.resolvedTree.rootDocumentUri,
+                provider.resolvedTree.rootDisplayName,
+            )
             val permission = provider.persistPermission(read = true, write = true)
             if (permission is StorageResult.Failure) {
                 showError(
@@ -278,7 +291,7 @@ class AndroidInstallWorkflow @Inject constructor(
                 return@launch
             }
             launcherInstances = info.instances
-            launcherTargets.remember(uri, info.instances)
+            launcherTargets.remember(uri, info.root, info.instances)
             update {
                 it.copy(
                     screen = InstallScreen.CONFIRMATION,
@@ -640,6 +653,7 @@ class AndroidInstallWorkflow @Inject constructor(
     }
 
     private companion object {
+        const val LAUNCHER_DISCOVERY_TAG = "LauncherDiscovery"
         const val MAX_LOGS = 200
     }
 }

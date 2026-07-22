@@ -9,6 +9,7 @@ import com.modrith.filesystem.StorageResult
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
+import java.util.ArrayDeque
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
@@ -25,37 +26,265 @@ class DefaultCSLauncherProvider(
     private val scanner: LauncherScanner = DefaultLauncherScanner(),
     private val validator: LauncherValidator = DefaultLauncherValidator(),
     private val logger: LauncherLogger = JvmLauncherLogger(),
+    private val maxDiscoveryDepth: Int = 6,
+    private val maxVisitedDirectories: Int = 256,
 ) : LauncherProvider {
     override suspend fun inspect(
         storage: StorageProvider,
         root: StoragePath,
     ): LauncherResult {
         logger.info(
-            "launcher.scan.started",
-            mapOf("providerId" to storage.providerId, "root" to root.value),
+            "launcher.discovery.started",
+            mapOf(
+                "providerId" to storage.providerId,
+                "selectedRoot" to root.displayValue(),
+                "maxDepth" to maxDiscoveryDepth,
+                "maxDirectories" to maxVisitedDirectories,
+            ),
         )
-        return when (val scan = scanner.scan(storage, root)) {
-            is LauncherScanResult.Failure -> {
+        val pending = ArrayDeque<DiscoveryDirectory>()
+        pending.add(DiscoveryDirectory(root, 0))
+        val visited = mutableSetOf<StoragePath>()
+        var bestRejected: RejectedCandidate? = null
+
+        while (pending.isNotEmpty() && visited.size < maxVisitedDirectories) {
+            currentCoroutineContext().ensureActive()
+            val directory = pending.removeFirst()
+            if (!visited.add(directory.path)) continue
+
+            logger.info(
+                "launcher.discovery.directory_visited",
+                mapOf(
+                    "path" to directory.path.displayValue(),
+                    "depth" to directory.depth,
+                ),
+            )
+            val listed = storage.list(directory.path)
+            if (listed is StorageResult.Failure) {
                 logger.warn(
-                    "launcher.scan.failed",
-                    mapOf("errors" to scan.errors.map(LauncherError::code)),
-                )
-                LauncherResult.Failure(scan.errors, scan.warnings)
-            }
-            is LauncherScanResult.Success -> validator.validate(scan.snapshot).also { result ->
-                val info = (result as? LauncherResult.Success)?.info
-                logger.info(
-                    "launcher.scan.completed",
+                    "launcher.discovery.directory_unreadable",
                     mapOf(
-                        "compatible" to info?.capabilities?.compatible,
-                        "profiles" to info?.instances?.size,
-                        "versions" to info?.versions?.size,
-                        "errors" to info?.errors?.size,
-                        "warnings" to info?.warnings?.size,
+                        "path" to directory.path.displayValue(),
+                        "error" to listed.error.code,
+                        "reason" to listed.error.message,
                     ),
                 )
+                continue
+            }
+            val entries = (listed as StorageResult.Success).value
+            val names = entries.map { it.name.lowercase(Locale.ROOT) }.toSet()
+            val markers = LauncherRootMarkers(
+                isDotMinecraft = directory.path.name.equals(DOT_MINECRAFT, ignoreCase = true),
+                hasDotMinecraft = DOT_MINECRAFT in names,
+                hasProfiles = PROFILES_FILE_NAME in names,
+                hasVersions = VERSIONS_DIRECTORY in names,
+                hasLibraries = LIBRARIES_DIRECTORY in names,
+                hasAssets = ASSETS_DIRECTORY in names,
+            )
+            logger.info(
+                "launcher.discovery.root_candidate",
+                markers.attributes(directory.path, directory.depth),
+            )
+
+            val result = inspectCandidate(storage, directory.path, markers)
+            val acceptedInfo = (result as? LauncherResult.Success)?.info
+                ?.takeIf { it.capabilities.compatible && it.instances.isNotEmpty() }
+            if (acceptedInfo != null) {
+                logger.info(
+                    "launcher.discovery.candidate_accepted",
+                    mapOf(
+                        "path" to directory.path.displayValue(),
+                        "reason" to "compatible launcher root with discoverable instances",
+                        "profiles" to acceptedInfo.instances.size,
+                        "versions" to acceptedInfo.versions.size,
+                    ),
+                )
+                return result
+            }
+
+            val rejection = rejectionReason(result, markers)
+            logger.info(
+                "launcher.discovery.candidate_rejected",
+                mapOf(
+                    "path" to directory.path.displayValue(),
+                    "reason" to rejection,
+                ),
+            )
+            val rejected = RejectedCandidate(markers.score, result)
+            if (bestRejected == null || rejected.score > bestRejected.score) {
+                bestRejected = rejected
+            }
+
+            if (directory.depth < maxDiscoveryDepth) {
+                entries.asSequence()
+                    .filter { it.type == StorageEntryType.DIRECTORY }
+                    .filterNot { it.name.lowercase(Locale.ROOT) in NON_DISCOVERY_DIRECTORIES }
+                    .sortedWith(
+                        compareBy<com.modrith.filesystem.StorageEntry>(
+                            { discoveryPriority(it.name) },
+                            { it.name.lowercase(Locale.ROOT) },
+                        ),
+                    )
+                    .forEach { entry ->
+                        pending.add(DiscoveryDirectory(entry.path, directory.depth + 1))
+                    }
             }
         }
+
+        if (pending.isNotEmpty()) {
+            logger.warn(
+                "launcher.discovery.limit_reached",
+                mapOf(
+                    "visitedDirectories" to visited.size,
+                    "remainingDirectories" to pending.size,
+                ),
+            )
+        }
+        logger.warn(
+            "launcher.discovery.failed",
+            mapOf(
+                "selectedRoot" to root.displayValue(),
+                "visitedDirectories" to visited.size,
+                "reason" to "no compatible CS Launcher V2 root was found",
+            ),
+        )
+        return bestRejected?.result ?: LauncherResult.Failure(
+            errors = listOf(
+                LauncherError(
+                    LauncherErrorCode.INVALID_ROOT,
+                    "No compatible CS Launcher V2 root was found in the selected tree.",
+                    root,
+                    recoverable = true,
+                ),
+            ),
+        )
+    }
+
+    private suspend fun inspectCandidate(
+        storage: StorageProvider,
+        root: StoragePath,
+        markers: LauncherRootMarkers,
+    ): LauncherResult {
+        if (!markers.hasLauncherMarker) {
+            return LauncherResult.Failure(
+                listOf(
+                    LauncherError(
+                        LauncherErrorCode.INVALID_ROOT,
+                        "Directory has no CS Launcher V2 root markers.",
+                        root,
+                        recoverable = true,
+                    ),
+                ),
+            )
+        }
+        return when (val scan = scanner.scan(storage, root)) {
+            is LauncherScanResult.Failure -> LauncherResult.Failure(scan.errors, scan.warnings)
+            is LauncherScanResult.Success -> validator.validate(scan.snapshot)
+        }
+    }
+
+    private fun rejectionReason(
+        result: LauncherResult,
+        markers: LauncherRootMarkers,
+    ): String {
+        if (!markers.hasLauncherMarker) return "no launcher root markers"
+        if (
+            markers.hasDotMinecraft && !markers.isDotMinecraft &&
+            !markers.hasProfiles && !markers.hasVersions
+        ) {
+            return "contains .minecraft; inspecting that child instead"
+        }
+        return when (result) {
+            is LauncherResult.Failure ->
+                result.errors.joinToString { "${it.code}: ${it.message}" }
+            is LauncherResult.Success -> when {
+                result.info.capabilities.compatible && result.info.instances.isEmpty() ->
+                    "launcher structure is compatible but no instances or installed versions were found"
+                !result.info.capabilities.compatible ->
+                    result.info.errors.joinToString { "${it.code}: ${it.message}" }
+                        .ifBlank { "launcher validator marked the structure incompatible" }
+                else -> "candidate did not satisfy launcher requirements"
+            }
+        }
+    }
+
+    private fun discoveryPriority(name: String): Int = when (name.lowercase(Locale.ROOT)) {
+        DOT_MINECRAFT -> 0
+        "files" -> 1
+        "com.craftstudio.cslauncher" -> 2
+        "android" -> 3
+        "data" -> 4
+        "games" -> 5
+        "amethyst" -> 6
+        else -> 10
+    }
+
+    private fun StoragePath.displayValue(): String = value.ifEmpty { "<selected-tree>" }
+
+    private data class DiscoveryDirectory(
+        val path: StoragePath,
+        val depth: Int,
+    )
+
+    private data class RejectedCandidate(
+        val score: Int,
+        val result: LauncherResult,
+    )
+
+    private data class LauncherRootMarkers(
+        val isDotMinecraft: Boolean,
+        val hasDotMinecraft: Boolean,
+        val hasProfiles: Boolean,
+        val hasVersions: Boolean,
+        val hasLibraries: Boolean,
+        val hasAssets: Boolean,
+    ) {
+        val score: Int
+            get() = listOf(
+                isDotMinecraft,
+                hasDotMinecraft,
+                hasProfiles,
+                hasVersions,
+                hasLibraries,
+                hasAssets,
+            ).count { it }
+
+        val hasLauncherMarker: Boolean
+            get() = score > 0
+
+        fun attributes(path: StoragePath, depth: Int): Map<String, Any?> = mapOf(
+            "path" to path.value.ifEmpty { "<selected-tree>" },
+            "depth" to depth,
+            "isDotMinecraft" to isDotMinecraft,
+            "hasDotMinecraft" to hasDotMinecraft,
+            "hasLauncherProfilesJson" to hasProfiles,
+            "hasVersions" to hasVersions,
+            "hasLibraries" to hasLibraries,
+            "hasAssets" to hasAssets,
+        )
+    }
+
+    private companion object {
+        const val DOT_MINECRAFT = ".minecraft"
+        const val PROFILES_FILE_NAME = "launcher_profiles.json"
+        const val VERSIONS_DIRECTORY = "versions"
+        const val LIBRARIES_DIRECTORY = "libraries"
+        const val ASSETS_DIRECTORY = "assets"
+
+        val NON_DISCOVERY_DIRECTORIES = setOf(
+            "assets",
+            "libraries",
+            "versions",
+            "runtime",
+            "runtimes",
+            "logs",
+            "crash-reports",
+            "resourcepacks",
+            "shaderpacks",
+            "saves",
+            "mods",
+            "config",
+        )
     }
 }
 
@@ -537,8 +766,9 @@ class DefaultLauncherValidator : LauncherValidator {
     override fun validate(snapshot: LauncherScanSnapshot): LauncherResult {
         val warnings = snapshot.warnings.toMutableList()
         val errors = snapshot.errors.toMutableList()
+        val currentRootStructure = snapshot.hasCurrentRootStructure()
 
-        if (!snapshot.profilesFilePresent) {
+        if (!snapshot.profilesFilePresent && !currentRootStructure) {
             errors += LauncherError(
                 LauncherErrorCode.MISSING_PROFILES_FILE,
                 "launcher_profiles.json is required for launcher compatibility.",
@@ -594,7 +824,7 @@ class DefaultLauncherValidator : LauncherValidator {
                 profileType = profile.profileType,
             )
         }
-        if (instances.isEmpty() && snapshot.isCurrentCSLauncherRoot()) {
+        if (instances.isEmpty() && currentRootStructure) {
             snapshot.versions
                 .distinctBy(LauncherVersion::id)
                 .forEach { version ->
@@ -659,13 +889,12 @@ class DefaultLauncherValidator : LauncherValidator {
     private fun StoragePath.child(name: String): StoragePath =
         if (isRoot) StoragePath(name) else StoragePath("$value/$name")
 
-    private fun LauncherScanSnapshot.isCurrentCSLauncherRoot(): Boolean =
-        profilesFilePresent &&
-            setOf(
-                LauncherDirectory.ASSETS,
-                LauncherDirectory.LIBRARIES,
-                LauncherDirectory.VERSIONS,
-            ).all(detectedDirectories::contains)
+    private fun LauncherScanSnapshot.hasCurrentRootStructure(): Boolean =
+        setOf(
+            LauncherDirectory.ASSETS,
+            LauncherDirectory.LIBRARIES,
+            LauncherDirectory.VERSIONS,
+        ).all(detectedDirectories::contains)
 
     private companion object {
         const val VERSION_INSTANCE_PREFIX = "cs-launcher-v2-version:"
