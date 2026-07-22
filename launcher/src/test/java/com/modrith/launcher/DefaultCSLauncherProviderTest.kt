@@ -101,8 +101,10 @@ class DefaultCSLauncherProviderTest {
         }
 
     @Test
-    fun missingFoldersProduceWarningsWithoutInventingThem() =
+    fun missingOptionalFoldersProduceWarningsWithoutInvalidatingLauncher() =
         withLauncherRoot { _, provider ->
+            provider.createDirectory(StoragePath("assets")).success()
+            provider.createDirectory(StoragePath("libraries")).success()
             provider.createDirectory(StoragePath("versions")).success()
             writeProfiles(provider, """{"profiles":{}}""")
             val readOnly = MutationDetectingProvider(provider)
@@ -112,9 +114,16 @@ class DefaultCSLauncherProviderTest {
             val missing = info.warnings.filter {
                 it.code == LauncherWarningCode.MISSING_DIRECTORY
             }
-            assertEquals(8, missing.size)
+            assertEquals(6, missing.size)
             assertTrue(info.capabilities.compatible)
-            assertEquals(setOf(LauncherDirectory.VERSIONS), info.detectedDirectories)
+            assertEquals(
+                setOf(
+                    LauncherDirectory.ASSETS,
+                    LauncherDirectory.LIBRARIES,
+                    LauncherDirectory.VERSIONS,
+                ),
+                info.detectedDirectories,
+            )
             assertEquals(0, readOnly.mutationCalls.get())
         }
 
@@ -215,7 +224,7 @@ class DefaultCSLauncherProviderTest {
         }
 
     @Test
-    fun legacyProfilesRemainCompatibleWithoutCurrentSharedDirectories() =
+    fun missingRequiredSharedDirectoriesAreIncompatible() =
         withLauncherRoot { _, provider ->
             provider.createDirectory(StoragePath("versions")).success()
             writeProfiles(
@@ -245,7 +254,9 @@ class DefaultCSLauncherProviderTest {
                 .inspect(MutationDetectingProvider(provider))
                 .success()
 
-            assertTrue(info.capabilities.compatible)
+            assertFalse(info.capabilities.compatible)
+            assertTrue(info.hasError(LauncherErrorCode.MISSING_ASSETS_DIRECTORY))
+            assertTrue(info.hasError(LauncherErrorCode.MISSING_LIBRARIES_DIRECTORY))
             assertEquals(listOf("fabric"), info.instances.map(LauncherInstance::profileId))
         }
 
@@ -266,8 +277,10 @@ class DefaultCSLauncherProviderTest {
         }
 
     @Test
-    fun duplicateProfilesAreDetectedByNormalizedProfileName() =
+    fun duplicateProfileNamesAreWarningsAndRemainCompatible() =
         withLauncherRoot { _, provider ->
+            provider.createDirectory(StoragePath("assets")).success()
+            provider.createDirectory(StoragePath("libraries")).success()
             provider.createDirectory(StoragePath("versions")).success()
             createVersion(provider, "1.21.1", versionJson("1.21.1"))
             writeProfiles(
@@ -286,9 +299,85 @@ class DefaultCSLauncherProviderTest {
                 .inspect(MutationDetectingProvider(provider))
                 .success()
 
-            assertFalse(info.capabilities.compatible)
-            assertTrue(info.hasError(LauncherErrorCode.DUPLICATE_PROFILE))
+            assertTrue(info.capabilities.compatible)
+            assertFalse(info.hasError(LauncherErrorCode.DUPLICATE_PROFILE))
+            assertTrue(info.hasWarning(LauncherWarningCode.DUPLICATE_PROFILE))
             assertEquals(2, info.instances.size)
+        }
+
+    @Test
+    fun currentCSLauncherV2DiagnosticsWithDuplicateProfileAndMissingDatapacksAreAccepted() =
+        withLauncherRoot { _, provider ->
+            val minecraftRoot = StoragePath(".minecraft")
+            provider.createDirectory(minecraftRoot).success()
+            provider.createDirectory(minecraftRoot.child("assets")).success()
+            provider.createDirectory(minecraftRoot.child("libraries")).success()
+            provider.createDirectory(minecraftRoot.child("versions")).success()
+            createVersion(
+                provider,
+                "fabric-loader-0.16.10-1.21.1",
+                versionJson(
+                    "fabric-loader-0.16.10-1.21.1",
+                    inheritsFrom = "1.21.1",
+                    library = "net.fabricmc:fabric-loader:0.16.10",
+                ),
+                minecraftRoot,
+            )
+            provider.replaceFile(
+                minecraftRoot.child("launcher_profiles.json"),
+                "application/json",
+            ) {
+                it.write(
+                    """
+                    {
+                      "profiles": {
+                        "first": {
+                          "name": "Fabric",
+                          "lastVersionId": "fabric-loader-0.16.10-1.21.1"
+                        },
+                        "second": {
+                          "name": " fabric ",
+                          "lastVersionId": "fabric-loader-0.16.10-1.21.1"
+                        }
+                      }
+                    }
+                    """.trimIndent().toByteArray(),
+                )
+            }.success()
+            val logger = RecordingLauncherLogger()
+
+            val info = DefaultCSLauncherProvider(logger = logger)
+                .inspect(MutationDetectingProvider(provider))
+                .success()
+
+            assertEquals(minecraftRoot, info.root)
+            assertTrue(info.capabilities.compatible)
+            assertEquals(2, info.instances.size)
+            assertTrue(info.hasWarning(LauncherWarningCode.DUPLICATE_PROFILE))
+            assertTrue(
+                info.warnings.any {
+                    it.code == LauncherWarningCode.MISSING_DIRECTORY &&
+                        it.path == minecraftRoot.child("datapacks")
+                },
+            )
+            assertTrue(
+                logger.events.any {
+                    it.event == "launcher.validation.issue" &&
+                        it.attributes["severity"] == "WARNING" &&
+                        it.attributes["code"] == "DUPLICATE_PROFILE" &&
+                        it.attributes["path"] == ".minecraft/launcher_profiles.json" &&
+                        it.attributes["fatal"] == false
+                },
+            )
+            assertTrue(
+                logger.events.any {
+                    it.event == "launcher.validation.issue" &&
+                        it.attributes["severity"] == "WARNING" &&
+                        it.attributes["code"] == "MISSING_DIRECTORY" &&
+                        it.attributes["path"] == ".minecraft/datapacks" &&
+                        it.attributes["fatal"] == false
+                },
+            )
         }
 
     @Test
@@ -433,6 +522,9 @@ class DefaultCSLauncherProviderTest {
 
     private fun LauncherInfo.hasError(code: LauncherErrorCode): Boolean =
         errors.any { it.code == code }
+
+    private fun LauncherInfo.hasWarning(code: LauncherWarningCode): Boolean =
+        warnings.any { it.code == code }
 
     private fun LauncherResult.success(): LauncherInfo =
         (this as? LauncherResult.Success)?.info ?: error("Expected success, got $this")

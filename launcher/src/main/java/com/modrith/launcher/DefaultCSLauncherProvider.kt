@@ -24,11 +24,13 @@ import kotlinx.serialization.json.jsonObject
 
 class DefaultCSLauncherProvider(
     private val scanner: LauncherScanner = DefaultLauncherScanner(),
-    private val validator: LauncherValidator = DefaultLauncherValidator(),
+    validator: LauncherValidator? = null,
     private val logger: LauncherLogger = JvmLauncherLogger(),
     private val maxDiscoveryDepth: Int = 6,
     private val maxVisitedDirectories: Int = 256,
 ) : LauncherProvider {
+    private val validator = validator ?: DefaultLauncherValidator(logger)
+
     override suspend fun inspect(
         storage: StorageProvider,
         root: StoragePath,
@@ -762,10 +764,23 @@ class DefaultLauncherScanner(
     }
 }
 
-class DefaultLauncherValidator : LauncherValidator {
+class DefaultLauncherValidator(
+    private val logger: LauncherLogger = JvmLauncherLogger(),
+) : LauncherValidator {
     override fun validate(snapshot: LauncherScanSnapshot): LauncherResult {
         val warnings = snapshot.warnings.toMutableList()
-        val errors = snapshot.errors.toMutableList()
+        val errors = snapshot.errors
+            .filterNot { it.code == LauncherErrorCode.DUPLICATE_PROFILE }
+            .toMutableList()
+        snapshot.errors
+            .filter { it.code == LauncherErrorCode.DUPLICATE_PROFILE }
+            .forEach { duplicate ->
+                warnings += LauncherWarning(
+                    LauncherWarningCode.DUPLICATE_PROFILE,
+                    duplicate.message,
+                    duplicate.path,
+                )
+            }
         val currentRootStructure = snapshot.hasCurrentRootStructure()
 
         if (!snapshot.profilesFilePresent && !currentRootStructure) {
@@ -773,6 +788,22 @@ class DefaultLauncherValidator : LauncherValidator {
                 LauncherErrorCode.MISSING_PROFILES_FILE,
                 "launcher_profiles.json is required for launcher compatibility.",
                 snapshot.root.child("launcher_profiles.json"),
+                recoverable = true,
+            )
+        }
+        if (LauncherDirectory.ASSETS !in snapshot.detectedDirectories) {
+            errors += LauncherError(
+                LauncherErrorCode.MISSING_ASSETS_DIRECTORY,
+                "The assets directory is required for launcher compatibility.",
+                snapshot.root.child(LauncherDirectory.ASSETS.relativePath),
+                recoverable = true,
+            )
+        }
+        if (LauncherDirectory.LIBRARIES !in snapshot.detectedDirectories) {
+            errors += LauncherError(
+                LauncherErrorCode.MISSING_LIBRARIES_DIRECTORY,
+                "The libraries directory is required for launcher compatibility.",
+                snapshot.root.child(LauncherDirectory.LIBRARIES.relativePath),
                 recoverable = true,
             )
         }
@@ -801,11 +832,10 @@ class DefaultLauncherValidator : LauncherValidator {
             val normalizedName = name.trim().lowercase(Locale.ROOT)
             val previous = profileNames.putIfAbsent(normalizedName, profile.profileId)
             if (previous != null) {
-                errors += LauncherError(
-                    LauncherErrorCode.DUPLICATE_PROFILE,
+                warnings += LauncherWarning(
+                    LauncherWarningCode.DUPLICATE_PROFILE,
                     "Multiple launcher profiles use the same name.",
                     snapshot.root.child("launcher_profiles.json"),
-                    recoverable = true,
                 )
             }
             val versionId = requireNotNull(profile.lastVersionId)
@@ -838,24 +868,8 @@ class DefaultLauncherValidator : LauncherValidator {
                 }
         }
 
-        val structureErrors = errors.any {
-            it.code in setOf(
-                LauncherErrorCode.INVALID_ROOT,
-                LauncherErrorCode.READ_PERMISSION_DENIED,
-                LauncherErrorCode.MISSING_PROFILES_FILE,
-                LauncherErrorCode.MISSING_VERSIONS_DIRECTORY,
-                LauncherErrorCode.UNSUPPORTED_STRUCTURE,
-                LauncherErrorCode.INVALID_PROFILES_JSON,
-                LauncherErrorCode.INVALID_PROFILES_SCHEMA,
-                LauncherErrorCode.PROFILES_TOO_LARGE,
-                LauncherErrorCode.STORAGE_IO,
-            )
-        }
         val capabilities = LauncherCapabilities(
-            compatible = !structureErrors && errors.none {
-                it.code == LauncherErrorCode.CORRUPTED_PROFILE ||
-                    it.code == LauncherErrorCode.DUPLICATE_PROFILE
-            },
+            compatible = errors.none { it.isFatal() },
             readOnly = true,
             canReadProfiles = snapshot.profilesFilePresent &&
                 errors.none {
@@ -871,6 +885,9 @@ class DefaultLauncherValidator : LauncherValidator {
             canCreateInstances = false,
             canEditProfiles = false,
         )
+        val distinctWarnings = warnings.distinct()
+        val distinctErrors = errors.distinct()
+        logIssues(distinctWarnings, distinctErrors)
         return LauncherResult.Success(
             LauncherInfo(
                 launcherId = "cs-launcher-v2",
@@ -880,11 +897,47 @@ class DefaultLauncherValidator : LauncherValidator {
                 versions = snapshot.versions.toList(),
                 detectedDirectories = snapshot.detectedDirectories.toSet(),
                 capabilities = capabilities,
-                warnings = warnings.distinct().toList(),
-                errors = errors.distinct().toList(),
+                warnings = distinctWarnings,
+                errors = distinctErrors,
             ),
         )
     }
+
+    private fun logIssues(
+        warnings: List<LauncherWarning>,
+        errors: List<LauncherError>,
+    ) {
+        warnings.forEach { warning ->
+            logger.warn(
+                "launcher.validation.issue",
+                mapOf(
+                    "severity" to "WARNING",
+                    "code" to warning.code.name,
+                    "path" to warning.path?.displayValue(),
+                    "fatal" to false,
+                ),
+            )
+        }
+        errors.forEach { error ->
+            val fatal = error.isFatal()
+            val attributes = mapOf(
+                "severity" to "ERROR",
+                "code" to error.code.name,
+                "path" to error.path?.displayValue(),
+                "fatal" to fatal,
+            )
+            if (fatal) {
+                logger.error("launcher.validation.issue", attributes)
+            } else {
+                logger.warn("launcher.validation.issue", attributes)
+            }
+        }
+    }
+
+    private fun LauncherError.isFatal(): Boolean =
+        code != LauncherErrorCode.DUPLICATE_PROFILE
+
+    private fun StoragePath.displayValue(): String = value.ifEmpty { "<selected-tree>" }
 
     private fun StoragePath.child(name: String): StoragePath =
         if (isRoot) StoragePath(name) else StoragePath("$value/$name")
