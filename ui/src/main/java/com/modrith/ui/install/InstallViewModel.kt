@@ -14,6 +14,8 @@ class InstallViewModel @Inject constructor(
 
     fun selectLauncherTree(uri: String) = workflow.selectLauncherTree(uri)
 
+    fun exportLauncherDiagnostics(uri: String) = workflow.exportLauncherDiagnostics(uri)
+
     fun selectLauncherInstance(profileId: String) =
         workflow.selectLauncherInstance(profileId)
 

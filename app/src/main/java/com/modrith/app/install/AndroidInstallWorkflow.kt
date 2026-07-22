@@ -7,11 +7,14 @@ import android.database.Cursor
 import android.net.Uri
 import android.provider.OpenableColumns
 import com.modrith.filesystem.DocumentTreeProvider
+import com.modrith.filesystem.StoragePath
 import com.modrith.filesystem.StorageResult
+import com.modrith.launcher.LauncherError
 import com.modrith.launcher.LauncherInfo
 import com.modrith.launcher.LauncherInstance
 import com.modrith.launcher.LauncherProvider
 import com.modrith.launcher.LauncherResult
+import com.modrith.launcher.LauncherWarning
 import com.modrith.models.MrPackParseResult
 import com.modrith.orchestrator.ArchiveSourceResult
 import com.modrith.orchestrator.InstallError
@@ -34,6 +37,7 @@ import com.modrith.ui.install.InstallResultUi
 import com.modrith.ui.install.InstallScreen
 import com.modrith.ui.install.InstallUiState
 import com.modrith.ui.install.InstallWorkflow
+import com.modrith.ui.install.LauncherDiagnosticsUi
 import com.modrith.ui.install.LauncherInstanceUi
 import com.modrith.ui.install.LauncherSummary
 import com.modrith.ui.install.PackSummary
@@ -225,10 +229,43 @@ class AndroidInstallWorkflow @Inject constructor(
             }
             launcherTreeUri = null
             launcherInstances = emptyList()
-            update { it.copy(busy = true, error = null) }
+            update {
+                it.copy(
+                    busy = true,
+                    error = null,
+                    launcher = null,
+                    selectedLauncherProfileId = null,
+                    launcherDiagnostics = LauncherDiagnosticsUi(
+                        selectedSafUri = uri,
+                        documentTreeRoot = null,
+                        treeDocumentId = null,
+                        rootDisplayName = null,
+                        visitedDirectories = emptyList(),
+                        discoveredFiles = emptyList(),
+                        launcherProfilesJsonExists = false,
+                        versionsDirectoryExists = false,
+                        librariesDirectoryExists = false,
+                        assetsDirectoryExists = false,
+                        dotMinecraftDirectoryExists = false,
+                        rejectionReason = null,
+                        discoveryLogs = listOf("0001  Selected SAF URI: $uri"),
+                    ),
+                )
+            }
             val provider = runCatching {
                 DocumentTreeProvider(context, Uri.parse(uri))
             }.getOrElse {
+                val reason = "INVALID_TREE_URI: ${it.message ?: "The URI could not be opened."}"
+                update { state ->
+                    val currentDiagnostics = state.launcherDiagnostics
+                    state.copy(
+                        launcherDiagnostics = currentDiagnostics?.copy(
+                            rejectionReason = reason,
+                            discoveryLogs = currentDiagnostics.discoveryLogs +
+                                "0002  REJECTED $reason",
+                        ),
+                    )
+                }
                 showError(
                     InstallError(
                         InstallErrorSource.FILESYSTEM,
@@ -239,6 +276,13 @@ class AndroidInstallWorkflow @Inject constructor(
                 )
                 return@launch
             }
+            val diagnostics = LauncherDiagnosticsRecorder(
+                delegate = provider,
+                selectedSafUri = uri,
+                documentTreeRoot = provider.resolvedTree.rootDocumentUri,
+                treeDocumentId = provider.resolvedTree.treeDocumentId,
+                rootDisplayName = provider.resolvedTree.rootDisplayName,
+            )
             Timber.tag(LAUNCHER_DISCOVERY_TAG).i(
                 "launcher.discovery.resolved_document_tree " +
                     "{selectedTreeUri=%s, treeDocumentId=%s, rootDocumentUri=%s, rootDisplayName=%s}",
@@ -249,6 +293,12 @@ class AndroidInstallWorkflow @Inject constructor(
             )
             val permission = provider.persistPermission(read = true, write = true)
             if (permission is StorageResult.Failure) {
+                val reason = "${permission.error.code}: ${permission.error.message}"
+                diagnostics.record("TREE PERMISSION -> rejected: $reason")
+                diagnostics.record("REJECTED $reason")
+                update {
+                    it.copy(launcherDiagnostics = diagnostics.snapshot(reason))
+                }
                 showError(
                     InstallError(
                         InstallErrorSource.FILESYSTEM,
@@ -259,10 +309,17 @@ class AndroidInstallWorkflow @Inject constructor(
                 )
                 return@launch
             }
+            diagnostics.record("TREE PERMISSION -> read=true write=true persisted=true")
             launcherTreeUri = uri
-            val info = when (val result = launcherProvider.inspect(provider)) {
+            val inspection = launcherProvider.inspect(diagnostics)
+            val info = when (inspection) {
                 is LauncherResult.Failure -> {
-                    val error = result.errors.firstOrNull()
+                    val reason = inspection.rejectionReason()
+                    diagnostics.record("REJECTED $reason")
+                    update {
+                        it.copy(launcherDiagnostics = diagnostics.snapshot(reason))
+                    }
+                    val error = inspection.errors.firstOrNull()
                     showError(
                         InstallError(
                             InstallErrorSource.LAUNCHER,
@@ -273,9 +330,14 @@ class AndroidInstallWorkflow @Inject constructor(
                     )
                     return@launch
                 }
-                is LauncherResult.Success -> result.info
+                is LauncherResult.Success -> inspection.info
             }
             if (!info.capabilities.compatible || info.instances.isEmpty()) {
+                val reason = inspection.rejectionReason()
+                diagnostics.record("REJECTED $reason")
+                update {
+                    it.copy(launcherDiagnostics = diagnostics.snapshot(reason))
+                }
                 showError(
                     InstallError(
                         InstallErrorSource.LAUNCHER,
@@ -290,6 +352,9 @@ class AndroidInstallWorkflow @Inject constructor(
                 )
                 return@launch
             }
+            diagnostics.record(
+                "ACCEPTED root=${info.root.displayValue()} instances=${info.instances.size}",
+            )
             launcherInstances = info.instances
             launcherTargets.remember(uri, info.root, info.instances)
             update {
@@ -299,6 +364,30 @@ class AndroidInstallWorkflow @Inject constructor(
                     launcher = info.toUi(),
                     selectedLauncherProfileId = info.instances.first().profileId,
                     error = null,
+                    launcherDiagnostics = diagnostics.snapshot(rejectionReason = null),
+                )
+            }
+        }
+    }
+
+    override fun exportLauncherDiagnostics(uri: String) {
+        val diagnostics = mutableState.value.launcherDiagnostics ?: return
+        scope.launch {
+            val result = runCatching {
+                contentResolver.openOutputStream(Uri.parse(uri), "w")?.bufferedWriter()?.use {
+                    it.write(diagnostics.toExportText())
+                } ?: error("The selected document could not be opened for writing.")
+            }
+            update { state ->
+                state.copy(
+                    launcherDiagnostics = state.launcherDiagnostics?.copy(
+                        exportStatus = result.fold(
+                            onSuccess = { "Diagnostics exported." },
+                            onFailure = { error ->
+                                "Export failed: ${error.message ?: "Unknown write error."}"
+                            },
+                        ),
+                    ),
                 )
             }
         }
@@ -566,6 +655,82 @@ class AndroidInstallWorkflow @Inject constructor(
         },
         warnings = warnings.map { it.message }.distinct(),
     )
+
+    private fun LauncherResult.rejectionReason(): String = when (this) {
+        is LauncherResult.Failure -> buildRejectionReason(
+            headline = "Launcher inspection failed.",
+            errors = errors,
+            warnings = warnings,
+        )
+        is LauncherResult.Success -> {
+            val headline = when {
+                !info.capabilities.compatible ->
+                    "Launcher validator marked the discovered structure incompatible."
+                info.instances.isEmpty() ->
+                    "Launcher structure was inspected but no launcher instances were discovered."
+                else -> "Launcher candidate did not pass discovery."
+            }
+            buildRejectionReason(headline, info.errors, info.warnings)
+        }
+    }
+
+    private fun buildRejectionReason(
+        headline: String,
+        errors: List<LauncherError>,
+        warnings: List<LauncherWarning>,
+    ): String = buildString {
+        append(headline)
+        if (errors.isNotEmpty()) {
+            append(" Errors: ")
+            append(errors.joinToString(" | ") { error ->
+                "${error.code} at ${error.path.displayValue()}: ${error.message}"
+            })
+        }
+        if (warnings.isNotEmpty()) {
+            append(" Warnings: ")
+            append(warnings.joinToString(" | ") { warning ->
+                "${warning.code} at ${warning.path.displayValue()}: ${warning.message}"
+            })
+        }
+    }
+
+    private fun LauncherDiagnosticsUi.toExportText(): String = buildString {
+        appendLine("Modrith Launcher Diagnostics")
+        appendLine("============================")
+        appendLine("Selected SAF URI: $selectedSafUri")
+        appendLine("Document tree root: ${documentTreeRoot ?: "<unavailable>"}")
+        appendLine("Tree document ID: ${treeDocumentId ?: "<unavailable>"}")
+        appendLine("Root display name: ${rootDisplayName ?: "<unavailable>"}")
+        appendLine()
+        appendLine("Required markers")
+        appendLine("----------------")
+        appendLine("launcher_profiles.json: ${launcherProfilesJsonExists.yesNo()}")
+        appendLine("versions/: ${versionsDirectoryExists.yesNo()}")
+        appendLine("libraries/: ${librariesDirectoryExists.yesNo()}")
+        appendLine("assets/: ${assetsDirectoryExists.yesNo()}")
+        appendLine(".minecraft/: ${dotMinecraftDirectoryExists.yesNo()}")
+        appendLine()
+        appendLine("Rejection reason")
+        appendLine("----------------")
+        appendLine(rejectionReason ?: "Not rejected.")
+        appendLine()
+        appendLine("Directories visited (${visitedDirectories.size})")
+        appendLine("----------------")
+        visitedDirectories.forEach(::appendLine)
+        appendLine()
+        appendLine("Files discovered (${discoveredFiles.size})")
+        appendLine("----------------")
+        discoveredFiles.forEach(::appendLine)
+        appendLine()
+        appendLine("Discovery log (${discoveryLogs.size} entries)")
+        appendLine("----------------")
+        discoveryLogs.forEach(::appendLine)
+    }
+
+    private fun Boolean.yesNo(): String = if (this) "YES" else "NO"
+
+    private fun StoragePath?.displayValue(): String =
+        this?.value?.ifEmpty { "<selected-tree>" } ?: "<unknown>"
 
     private fun InstallState.toUiProgress(): InstallProgressUi {
         val title = when (progress.phase) {

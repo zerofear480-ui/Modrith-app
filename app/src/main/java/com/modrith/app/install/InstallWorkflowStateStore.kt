@@ -3,6 +3,7 @@ package com.modrith.app.install
 import android.content.Context
 import com.modrith.launcher.LauncherInstance
 import com.modrith.ui.install.InstallErrorUi
+import com.modrith.ui.install.LauncherDiagnosticsUi
 import com.modrith.ui.install.InstallLogUi
 import com.modrith.ui.install.InstallProgressUi
 import com.modrith.ui.install.InstallResultUi
@@ -45,6 +46,7 @@ class InstallWorkflowStateStore @Inject constructor(
             put("logs", JSONArray(state.logs.map { log -> log.toJson() }))
             put("result", state.result?.toJson())
             put("error", state.error?.toJson())
+            put("launcherDiagnostics", state.launcherDiagnostics?.toJson())
             put(
                 "launcherInstances",
                 JSONArray(launcherInstances.map { instance -> instance.toJson() }),
@@ -89,6 +91,8 @@ class InstallWorkflowStateStore @Inject constructor(
         result = json.optJSONObject("result")?.let(::decodeResult),
         error = json.optJSONObject("error")?.let(::decodeError),
         resumableSessionId = json.nullableString("resumableSessionId"),
+        launcherDiagnostics = json.optJSONObject("launcherDiagnostics")
+            ?.let(::decodeLauncherDiagnostics),
     )
 
     private fun PackSummary.toJson() = JSONObject().apply {
@@ -209,6 +213,40 @@ class InstallWorkflowStateStore @Inject constructor(
         action = json.getString("action"),
         recoverable = json.getBoolean("recoverable"),
         code = json.getString("code"),
+    )
+
+    private fun LauncherDiagnosticsUi.toJson() = JSONObject().apply {
+        put("selectedSafUri", selectedSafUri)
+        put("documentTreeRoot", documentTreeRoot)
+        put("treeDocumentId", treeDocumentId)
+        put("rootDisplayName", rootDisplayName)
+        put("visitedDirectories", JSONArray(visitedDirectories))
+        put("discoveredFiles", JSONArray(discoveredFiles))
+        put("launcherProfilesJsonExists", launcherProfilesJsonExists)
+        put("versionsDirectoryExists", versionsDirectoryExists)
+        put("librariesDirectoryExists", librariesDirectoryExists)
+        put("assetsDirectoryExists", assetsDirectoryExists)
+        put("dotMinecraftDirectoryExists", dotMinecraftDirectoryExists)
+        put("rejectionReason", rejectionReason)
+        put("discoveryLogs", JSONArray(discoveryLogs))
+        put("exportStatus", exportStatus)
+    }
+
+    private fun decodeLauncherDiagnostics(json: JSONObject) = LauncherDiagnosticsUi(
+        selectedSafUri = json.getString("selectedSafUri"),
+        documentTreeRoot = json.nullableString("documentTreeRoot"),
+        treeDocumentId = json.nullableString("treeDocumentId"),
+        rootDisplayName = json.nullableString("rootDisplayName"),
+        visitedDirectories = json.optJSONArray("visitedDirectories")?.strings().orEmpty(),
+        discoveredFiles = json.optJSONArray("discoveredFiles")?.strings().orEmpty(),
+        launcherProfilesJsonExists = json.optBoolean("launcherProfilesJsonExists"),
+        versionsDirectoryExists = json.optBoolean("versionsDirectoryExists"),
+        librariesDirectoryExists = json.optBoolean("librariesDirectoryExists"),
+        assetsDirectoryExists = json.optBoolean("assetsDirectoryExists"),
+        dotMinecraftDirectoryExists = json.optBoolean("dotMinecraftDirectoryExists"),
+        rejectionReason = json.nullableString("rejectionReason"),
+        discoveryLogs = json.optJSONArray("discoveryLogs")?.strings().orEmpty(),
+        exportStatus = json.nullableString("exportStatus"),
     )
 
     private fun LauncherInstance.toJson() = JSONObject().apply {

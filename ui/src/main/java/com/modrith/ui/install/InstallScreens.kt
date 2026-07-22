@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.material.icons.Icons
@@ -19,6 +20,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -55,6 +57,11 @@ fun InstallConfirmationScreen(
         ActivityResultContracts.OpenDocumentTree(),
     ) { uri ->
         uri?.let { viewModel.selectLauncherTree(it.toString()) }
+    }
+    val diagnosticsExporter = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/plain"),
+    ) { uri ->
+        uri?.let { viewModel.exportLauncherDiagnostics(it.toString()) }
     }
 
     Scaffold(
@@ -152,6 +159,12 @@ fun InstallConfirmationScreen(
                     }
                 }
             }
+            launcherDiagnosticsItems(
+                diagnostics = state.launcherDiagnostics,
+                onExport = {
+                    diagnosticsExporter.launch(LAUNCHER_DIAGNOSTICS_FILE_NAME)
+                },
+            )
             state.launcher?.let { launcher ->
                 item {
                     Text(
@@ -336,70 +349,223 @@ fun InstallErrorScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val error = state.error
+    val diagnosticsExporter = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/plain"),
+    ) { uri ->
+        uri?.let { viewModel.exportLauncherDiagnostics(it.toString()) }
+    }
 
     Scaffold(topBar = { TopAppBar(title = { Text("Installation stopped") }) }) { padding ->
-        Column(
+        LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(24.dp),
+                .padding(horizontal = 24.dp),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 24.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            Text(
-                error?.title ?: "Installation could not continue",
-                style = MaterialTheme.typography.headlineSmall,
-                color = MaterialTheme.colorScheme.error,
-            )
-            Text(
-                error?.message ?: "An unexpected installation error occurred.",
-                style = MaterialTheme.typography.bodyLarge,
-            )
-            error?.action?.let {
+            item {
                 Text(
-                    it,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    error?.title ?: "Installation could not continue",
+                    style = MaterialTheme.typography.headlineSmall,
+                    color = MaterialTheme.colorScheme.error,
                 )
             }
-            error?.code?.let {
+            item {
                 Text(
-                    "Error code: $it",
-                    style = MaterialTheme.typography.labelMedium,
+                    error?.message ?: "An unexpected installation error occurred.",
+                    style = MaterialTheme.typography.bodyLarge,
                 )
             }
-            HorizontalDivider()
-            Text("Recent log", style = MaterialTheme.typography.titleMedium)
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                items(state.logs.takeLast(50)) { LogLine(it) }
-            }
-            if (error?.recoverable == true) {
-                Button(
-                    onClick = viewModel::retryInstallation,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Icon(
-                        Icons.Default.Refresh,
-                        contentDescription = null,
-                        modifier = Modifier.padding(end = 8.dp),
+            error?.action?.let { action ->
+                item {
+                    Text(
+                        action,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    Text("Retry")
                 }
             }
-            OutlinedButton(
-                onClick = {
-                    viewModel.reset()
-                    onChooseAnother()
+            error?.code?.let { code ->
+                item {
+                    Text(
+                        "Error code: $code",
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
+            }
+            launcherDiagnosticsItems(
+                diagnostics = state.launcherDiagnostics,
+                onExport = {
+                    diagnosticsExporter.launch(LAUNCHER_DIAGNOSTICS_FILE_NAME)
                 },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Choose another pack")
+            )
+            item { HorizontalDivider() }
+            item { Text("Recent log", style = MaterialTheme.typography.titleMedium) }
+            items(state.logs.takeLast(50)) { LogLine(it) }
+            if (error?.recoverable == true) {
+                item {
+                    Button(
+                        onClick = viewModel::retryInstallation,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Icon(
+                            Icons.Default.Refresh,
+                            contentDescription = null,
+                            modifier = Modifier.padding(end = 8.dp),
+                        )
+                        Text("Retry")
+                    }
+                }
+            }
+            item {
+                OutlinedButton(
+                    onClick = {
+                        viewModel.reset()
+                        onChooseAnother()
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Choose another pack")
+                }
             }
         }
     }
+}
+
+private fun LazyListScope.launcherDiagnosticsItems(
+    diagnostics: LauncherDiagnosticsUi?,
+    onExport: () -> Unit,
+) {
+    if (diagnostics == null) return
+
+    item {
+        HorizontalDivider()
+    }
+    item {
+        Text("Launcher diagnostics", style = MaterialTheme.typography.titleLarge)
+    }
+    item {
+        DiagnosticValue("Selected SAF URI", diagnostics.selectedSafUri)
+    }
+    item {
+        DiagnosticValue(
+            "Document tree root",
+            diagnostics.documentTreeRoot ?: "<unavailable>",
+        )
+    }
+    item {
+        DiagnosticValue("Tree document ID", diagnostics.treeDocumentId ?: "<unavailable>")
+    }
+    item {
+        DiagnosticValue("Root display name", diagnostics.rootDisplayName ?: "<unavailable>")
+    }
+    item {
+        SummarySection("Required paths") {
+            DiagnosticPresence(
+                "launcher_profiles.json",
+                diagnostics.launcherProfilesJsonExists,
+            )
+            DiagnosticPresence("versions/", diagnostics.versionsDirectoryExists)
+            DiagnosticPresence("libraries/", diagnostics.librariesDirectoryExists)
+            DiagnosticPresence("assets/", diagnostics.assetsDirectoryExists)
+            DiagnosticPresence(".minecraft/", diagnostics.dotMinecraftDirectoryExists)
+        }
+    }
+    diagnostics.rejectionReason?.let { reason ->
+        item {
+            SummarySection("Exact rejection reason") {
+                Text(
+                    reason,
+                    style = MaterialTheme.typography.bodySmall.copy(
+                        fontFamily = FontFamily.Monospace,
+                    ),
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+        }
+    }
+    item {
+        Text(
+            "Directories visited (${diagnostics.visitedDirectories.size})",
+            style = MaterialTheme.typography.titleMedium,
+        )
+    }
+    if (diagnostics.visitedDirectories.isEmpty()) {
+        item { Text("None") }
+    } else {
+        items(diagnostics.visitedDirectories) { path ->
+            DiagnosticPath(path)
+        }
+    }
+    item {
+        Text(
+            "Files discovered (${diagnostics.discoveredFiles.size})",
+            style = MaterialTheme.typography.titleMedium,
+        )
+    }
+    if (diagnostics.discoveredFiles.isEmpty()) {
+        item { Text("None") }
+    } else {
+        items(diagnostics.discoveredFiles) { path ->
+            DiagnosticPath(path)
+        }
+    }
+    item {
+        OutlinedButton(
+            onClick = onExport,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Icon(
+                Icons.Default.SaveAlt,
+                contentDescription = null,
+                modifier = Modifier.padding(end = 8.dp),
+            )
+            Text("Export Launcher Diagnostics")
+        }
+    }
+    diagnostics.exportStatus?.let { status ->
+        item {
+            Text(
+                status,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun DiagnosticValue(
+    label: String,
+    value: String,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(label, style = MaterialTheme.typography.labelLarge)
+        Text(
+            value,
+            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+        )
+    }
+}
+
+@Composable
+private fun DiagnosticPresence(
+    name: String,
+    exists: Boolean,
+) {
+    Text(
+        "$name: ${if (exists) "YES" else "NO"}",
+        style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+    )
+}
+
+@Composable
+private fun DiagnosticPath(path: String) {
+    Text(
+        path,
+        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+        modifier = Modifier.fillMaxWidth(),
+    )
 }
 
 @Composable
@@ -458,3 +624,5 @@ private fun formatDuration(millis: Long): String {
         "${(seconds + 59) / 60} min"
     }
 }
+
+private const val LAUNCHER_DIAGNOSTICS_FILE_NAME = "modrith-launcher-diagnostics.txt"

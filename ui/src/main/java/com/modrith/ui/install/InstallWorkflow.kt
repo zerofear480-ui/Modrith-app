@@ -9,6 +9,8 @@ interface InstallWorkflow {
 
     fun selectLauncherTree(uri: String)
 
+    fun exportLauncherDiagnostics(uri: String)
+
     fun selectLauncherInstance(profileId: String)
 
     fun startInstallation()
@@ -39,6 +41,7 @@ data class InstallUiState(
     val result: InstallResultUi? = null,
     val error: InstallErrorUi? = null,
     val resumableSessionId: String? = null,
+    val launcherDiagnostics: LauncherDiagnosticsUi? = null,
 ) {
     val canInstall: Boolean
         get() = pack != null &&
@@ -46,6 +49,23 @@ data class InstallUiState(
             selectedLauncherProfileId != null &&
             !busy
 }
+
+data class LauncherDiagnosticsUi(
+    val selectedSafUri: String,
+    val documentTreeRoot: String?,
+    val treeDocumentId: String?,
+    val rootDisplayName: String?,
+    val visitedDirectories: List<String>,
+    val discoveredFiles: List<String>,
+    val launcherProfilesJsonExists: Boolean,
+    val versionsDirectoryExists: Boolean,
+    val librariesDirectoryExists: Boolean,
+    val assetsDirectoryExists: Boolean,
+    val dotMinecraftDirectoryExists: Boolean,
+    val rejectionReason: String?,
+    val discoveryLogs: List<String>,
+    val exportStatus: String? = null,
+)
 
 data class PackSummary(
     val displayName: String,
