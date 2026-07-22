@@ -21,6 +21,7 @@ import com.modrith.models.ResolvedFileType
 import com.modrith.models.ResolvedHash
 import com.modrith.models.ResolvedInstallPlan
 import com.modrith.models.ResolvedLoader
+import java.io.File
 import java.io.IOException
 import java.net.SocketTimeoutException
 import java.nio.file.Files
@@ -62,7 +63,10 @@ class OkHttpDownloadEngineTest {
 
         assertEquals(DownloadSessionStatus.COMPLETED, result.status)
         assertEquals(DownloadArtifactStatus.DOWNLOADED, result.artifacts.single().status)
-        assertArrayEquals(content, Files.readAllBytes(Path.of(result.artifacts.single().cachePath)))
+        assertArrayEquals(
+            content,
+            Files.readAllBytes(File(result.artifacts.single().cachePath).toPath()),
+        )
         assertEquals("Modrith-Test/1.0", interceptor.requests.single().header("User-Agent"))
         assertTrue(progress.any { it.downloadedBytes == content.size.toLong() })
         assertEquals(content.size.toLong(), result.totalBytes)

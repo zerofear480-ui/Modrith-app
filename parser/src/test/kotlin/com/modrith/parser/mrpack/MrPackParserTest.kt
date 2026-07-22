@@ -3,8 +3,10 @@ package com.modrith.parser.mrpack
 import com.modrith.models.LoaderType
 import com.modrith.models.MrPackParseErrorCode
 import com.modrith.models.MrPackParseResult
+import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.Paths
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import org.junit.Assert.assertEquals
@@ -44,13 +46,13 @@ class MrPackParserTest {
             assertEquals(1234L, result.plan.totalDownloadSize)
             assertTrue(
                 Files.isRegularFile(
-                    Path.of(result.plan.cacheDirectory)
+                    File(result.plan.cacheDirectory).toPath()
                         .resolve("overrides/config/example.json"),
                 ),
             )
             assertTrue(
                 Files.isRegularFile(
-                    Path.of(result.plan.cacheDirectory)
+                    File(result.plan.cacheDirectory).toPath()
                         .resolve("client-overrides/options.txt"),
                 ),
             )
@@ -117,7 +119,7 @@ class MrPackParserTest {
             val resource = checkNotNull(
                 javaClass.classLoader.getResource("fixtures/Spunky Optimized 1.21.11.1.mrpack"),
             )
-            val archive = Path.of(resource.toURI())
+            val archive = Paths.get(resource.toURI())
 
             val result = parser.parse(archive, root.resolve("cache")).success()
 

@@ -9,7 +9,7 @@ import com.modrith.orchestrator.MrPackSource
 import com.modrith.orchestrator.OrchestratorCheckpoint
 import com.modrith.orchestrator.OrchestratorCheckpointRepository
 import dagger.hilt.android.qualifiers.ApplicationContext
-import java.nio.file.Path
+import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -59,7 +59,7 @@ class PersistentCheckpointRepository @Inject constructor(
         val request = InstallRequest(
             source = decodeSource(json.getJSONObject("source")),
             launcherInstance = decodeLauncher(json.getJSONObject("launcher")),
-            cacheDirectory = Path.of(json.getString("cacheDirectory")),
+            cacheDirectory = File(json.getString("cacheDirectory")).toPath(),
             downloadConfiguration = decodeConfiguration(
                 json.getJSONObject("downloadConfiguration"),
             ),
