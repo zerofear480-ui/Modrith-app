@@ -45,13 +45,12 @@ class JvmInstallLogger(
         val safe = attributes.entries.joinToString(prefix = "{", postfix = "}") {
             "${it.key}=${redact(it.value)}"
         }
-        logger.log(
-            level,
-            buildString {
-                append("$event $safe")
-                cause?.let { append(" cause=${it::class.simpleName ?: "unknown"}") }
-            },
-        )
+        val message = "$event $safe"
+        if (cause == null) {
+            logger.log(level, message)
+        } else {
+            logger.log(level, message, cause)
+        }
     }
 
     private fun redact(value: Any?): String =

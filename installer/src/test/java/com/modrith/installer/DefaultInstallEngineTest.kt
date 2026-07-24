@@ -297,6 +297,38 @@ class DefaultInstallEngineTest {
     }
 
     @Test
+    fun unexpectedProviderExceptionRetainsExactDebugDetails() = withRoots { root ->
+        val fixture = fixture(
+            root,
+            downloads = linkedMapOf("mods/provider-failure.jar" to "content".toByteArray()),
+        )
+        val destination = ThrowingReplaceProvider(CacheProvider(root.resolve("destination")))
+
+        val result = engine(
+            repository = InMemoryInstallRepository(),
+            includeExceptionDetails = true,
+        ).start(
+            fixture.plan,
+            fixture.downloadSession,
+            destination,
+        ).await()
+
+        assertEquals(InstallSessionStatus.FAILED, result.status)
+        assertEquals(InstallFailureCode.INTERNAL, result.failure?.code)
+        assertEquals(
+            IllegalStateException::class.qualifiedName,
+            result.failure?.details?.get("exceptionClass"),
+        )
+        assertEquals("SAF provider rename failed.", result.failure?.details?.get("exceptionMessage"))
+        assertEquals("stage_copy", result.failure?.details?.get("failingStep"))
+        assertEquals(
+            "mods/provider-failure.jar",
+            result.failure?.details?.get("failingPath"),
+        )
+        assertTrue(result.failure?.details?.get("stackTrace")?.contains("IllegalStateException") == true)
+    }
+
+    @Test
     fun cancellationRestoresExistingFileAndCleansTransactionData() = withRoots { root ->
         val fixture = fixture(
             root,
@@ -357,10 +389,12 @@ class DefaultInstallEngineTest {
     private fun engine(
         repository: InstallRepository,
         diskSpaceChecker: InstallDiskSpaceChecker = InstallDiskSpaceChecker { _, _ -> true },
+        includeExceptionDetails: Boolean = false,
     ) = DefaultInstallEngine(
         repository = repository,
         dispatcher = Dispatchers.IO,
         diskSpaceChecker = diskSpaceChecker,
+        includeExceptionDetails = includeExceptionDetails,
     )
 
     private fun fixture(
@@ -620,5 +654,17 @@ private class BlockingReplaceProvider(
             delay(Long.MAX_VALUE)
         }
         return delegate.replaceFile(path, mimeType, writer)
+    }
+}
+
+private class ThrowingReplaceProvider(
+    private val delegate: StorageProvider,
+) : StorageProvider by delegate {
+    override suspend fun replaceFile(
+        path: StoragePath,
+        mimeType: String,
+        writer: suspend (OutputStream) -> Unit,
+    ): StorageResult<FileReplaceResult> {
+        throw IllegalStateException("SAF provider rename failed.")
     }
 }

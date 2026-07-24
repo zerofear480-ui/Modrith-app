@@ -3,9 +3,11 @@ package com.modrith.app.di
 import android.content.ContentResolver
 import android.content.Context
 import androidx.room.Room
+import com.modrith.app.BuildConfig
 import com.modrith.app.install.AndroidInstallWorkflow
 import com.modrith.app.install.PersistentCheckpointRepository
 import com.modrith.app.install.SafLauncherTargetRegistry
+import com.modrith.app.install.TimberInstallLogger
 import com.modrith.app.install.TimberLauncherLogger
 import com.modrith.core.di.IoDispatcher
 import com.modrith.downloader.OkHttpDownloadEngine
@@ -115,6 +117,8 @@ object InstallProvidersModule {
     ): InstallEngine = DefaultInstallEngine(
         repository = repository,
         dispatcher = dispatcher,
+        logger = TimberInstallLogger(),
+        includeExceptionDetails = BuildConfig.ENABLE_VERBOSE_LOGGING,
     )
 
     @Provides
@@ -125,7 +129,9 @@ object InstallProvidersModule {
 
     @Provides
     @Singleton
-    fun provideInstallLogger(): InstallLogger = JvmInstallLogger()
+    fun provideInstallLogger(): InstallLogger = JvmInstallLogger(
+        includeThrowableDetails = BuildConfig.ENABLE_VERBOSE_LOGGING,
+    )
 
     @Provides
     @Singleton
@@ -167,6 +173,7 @@ object InstallProvidersModule {
         sourceResolver = sourceResolver,
         checkpoints = checkpoints,
         logger = logger,
+        includeExceptionDetails = BuildConfig.ENABLE_VERBOSE_LOGGING,
     )
 
     @Provides

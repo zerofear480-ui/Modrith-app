@@ -329,14 +329,17 @@ class DocumentTreeProvider(
 
             val existing = parent.findFile(targetName)
             val guarantee = if (existing == null) {
-                if (!temporary.renameTo(targetName)) {
-                    return@withContext failure(
-                        StorageErrorCode.IO_ERROR,
-                        "Temporary document could not be promoted.",
-                        path,
-                    )
+                if (temporary.tryRenameTo(targetName)) {
+                    ReplaceGuarantee.PROVIDER_RENAME
+                } else {
+                    copyTemporaryToTarget(parent, temporary, targetName, mimeType, path)
+                        ?: return@withContext failure(
+                            StorageErrorCode.IO_ERROR,
+                            "Temporary document could not be promoted.",
+                            path,
+                        )
+                    ReplaceGuarantee.BEST_EFFORT
                 }
-                ReplaceGuarantee.PROVIDER_RENAME
             } else {
                 if (existing.isDirectory) {
                     return@withContext failure(
@@ -345,21 +348,26 @@ class DocumentTreeProvider(
                         path,
                     )
                 }
-                if (!existing.renameTo(backupName)) {
-                    return@withContext failure(
-                        StorageErrorCode.IO_ERROR,
-                        "Existing document could not be staged for replacement.",
-                        path,
-                    )
-                }
-                backup = parent.findFile(backupName)
-                if (!temporary.renameTo(targetName)) {
-                    backup?.renameTo(targetName)
-                    return@withContext failure(
-                        StorageErrorCode.IO_ERROR,
-                        "Temporary document could not replace the destination.",
-                        path,
-                    )
+                if (!existing.tryRenameTo(backupName)) {
+                    copyTemporaryToTarget(parent, temporary, targetName, mimeType, path)
+                        ?: return@withContext failure(
+                            StorageErrorCode.IO_ERROR,
+                            "Temporary document could not replace the destination.",
+                            path,
+                        )
+                } else {
+                    backup = parent.findFile(backupName)
+                    if (!temporary.tryRenameTo(targetName)) {
+                        if (backup?.tryRenameTo(targetName) == true) {
+                            backup = null
+                        }
+                        copyTemporaryToTarget(parent, temporary, targetName, mimeType, path)
+                            ?: return@withContext failure(
+                                StorageErrorCode.IO_ERROR,
+                                "Temporary document could not replace the destination.",
+                                path,
+                            )
+                    }
                 }
                 backup?.delete()
                 backup = null
@@ -379,20 +387,58 @@ class DocumentTreeProvider(
             StorageResult.Success(result)
         } catch (error: CancellationException) {
             temporary.delete()
-            backup?.renameTo(targetName)
+            backup?.tryRenameTo(targetName)
             throw error
         } catch (error: SecurityException) {
             temporary.delete()
-            backup?.renameTo(targetName)
+            backup?.tryRenameTo(targetName)
             permissionFailure(read = false, path)
         } catch (error: IOException) {
             temporary.delete()
-            backup?.renameTo(targetName)
+            backup?.tryRenameTo(targetName)
             ioFailure("Document replacement failed.", path, error)
         } finally {
             parent.findFile(temporaryName)?.delete()
         }
     }
+
+    private suspend fun copyTemporaryToTarget(
+        parent: DocumentFile,
+        temporary: DocumentFile,
+        targetName: String,
+        mimeType: String,
+        path: StoragePath,
+    ): DocumentFile? {
+        val target = parent.findFile(targetName) ?: parent.createFile(mimeType, targetName)
+            ?: return null
+        if (!target.isFile || !target.canWrite()) return null
+        val input = resolver.openInputStream(temporary.uri) ?: return null
+        val output = resolver.openOutputStream(target.uri, "rwt") ?: run {
+            input.close()
+            return null
+        }
+        input.buffered().use { source ->
+            output.buffered().use { destination ->
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                while (true) {
+                    currentCoroutineContext().ensureActive()
+                    val read = source.read(buffer)
+                    if (read < 0) break
+                    destination.write(buffer, 0, read)
+                }
+                destination.flush()
+            }
+        }
+        logger.warn(
+            "storage.tree.rename_fallback",
+            mapOf("path" to path.value),
+        )
+        temporary.delete()
+        return target
+    }
+
+    private fun DocumentFile.tryRenameTo(displayName: String): Boolean =
+        runCatching { renameTo(displayName) }.getOrDefault(false)
 
     override suspend fun delete(
         path: StoragePath,

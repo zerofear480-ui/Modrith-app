@@ -42,6 +42,7 @@ class InstallPipeline(
     private val sourceResolver: MrPackSourceResolver,
     private val checkpoints: OrchestratorCheckpointRepository,
     private val logger: InstallLogger,
+    private val includeExceptionDetails: Boolean = false,
 ) {
     internal suspend fun execute(
         initial: OrchestratorCheckpoint,
@@ -393,12 +394,48 @@ class InstallPipeline(
                 checkpoint = checkpoint,
             )
         } catch (error: Throwable) {
+            val frame = error.stackTrace.firstOrNull {
+                it.className.startsWith("com.modrith.")
+            } ?: error.stackTrace.firstOrNull()
+            val details = if (includeExceptionDetails) {
+                buildMap {
+                    put(
+                        "exceptionClass",
+                        error::class.qualifiedName ?: error::class.simpleName.orEmpty(),
+                    )
+                    put("exceptionMessage", error.message.orEmpty())
+                    put("failingMethod", frame?.methodName.orEmpty())
+                    put("failingFile", frame?.fileName.orEmpty())
+                    put("failingLine", frame?.lineNumber?.toString().orEmpty())
+                    put("stackTrace", error.stackTraceToString())
+                }
+            } else {
+                mapOf("type" to (error::class.simpleName ?: "unknown"))
+            }
             val internal = InstallError(
                 source = InstallErrorSource.ORCHESTRATOR,
                 code = "INTERNAL",
-                message = "The installation pipeline failed unexpectedly.",
+                message = if (includeExceptionDetails) {
+                    buildString {
+                        append(error::class.simpleName ?: "Throwable")
+                        error.message?.takeIf(String::isNotBlank)?.let {
+                            append(": ")
+                            append(it)
+                        }
+                        append(" in ")
+                        append(frame?.methodName ?: "InstallPipeline.execute")
+                        frame?.fileName?.let {
+                            append(" (")
+                            append(it)
+                            if (frame.lineNumber > 0) append(":${frame.lineNumber}")
+                            append(')')
+                        }
+                    }
+                } else {
+                    "The installation pipeline failed unexpectedly."
+                },
                 recoverable = false,
-                details = mapOf("type" to (error::class.simpleName ?: "unknown")),
+                details = details,
             )
             logger.log(
                 checkpoint.sessionId,
@@ -631,7 +668,10 @@ class InstallPipeline(
             code = failure?.code?.name ?: InstallFailureCode.INTERNAL.name,
             message = failure?.message ?: "Installation did not complete.",
             recoverable = failure?.recoverable ?: false,
-            details = mapOf("path" to (failure?.path ?: "")),
+            details = buildMap {
+                failure?.path?.let { put("path", it) }
+                failure?.details?.let(::putAll)
+            },
         )
 
     private fun launcherError(

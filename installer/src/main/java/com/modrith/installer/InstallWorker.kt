@@ -31,6 +31,7 @@ class InstallWorker(
     private val clock: InstallClock = SystemInstallClock,
     private val fileHasher: FileHasher = FileHasher(),
     private val copyEngine: CopyEngine = CopyEngine(),
+    private val includeExceptionDetails: Boolean = false,
 ) {
     suspend fun install(
         transactionId: String,
@@ -39,6 +40,10 @@ class InstallWorker(
         destination: StorageProvider,
         progressListener: InstallProgressListener,
     ): InstallSessionResult {
+        logger.info(
+            "install.step.before",
+            stepAttributes(transactionId, "validate_plan"),
+        )
         if (!plan.isReady) {
             return failed(
                 transactionId,
@@ -49,6 +54,10 @@ class InstallWorker(
                 ),
             )
         }
+        logger.info(
+            "install.step.after",
+            stepAttributes(transactionId, "validate_plan"),
+        )
         emit(
             progressListener,
             transactionId,
@@ -59,7 +68,19 @@ class InstallWorker(
             0,
             plan.totalDownloadSize,
         )
+        logger.info(
+            "install.step.before",
+            stepAttributes(transactionId, "await_downloads"),
+        )
         val downloadResult = downloadSession.await()
+        logger.info(
+            "install.step.after",
+            stepAttributes(
+                transactionId,
+                "await_downloads",
+                attributes = mapOf("status" to downloadResult.status),
+            ),
+        )
         if (downloadResult.status != DownloadSessionStatus.COMPLETED) {
             return failed(
                 transactionId,
@@ -72,12 +93,26 @@ class InstallWorker(
         }
 
         var transaction: InstallTransaction? = null
+        var activeStep = "prepare_operations"
+        var activePath: String? = null
         return try {
+            logger.info(
+                "install.step.before",
+                stepAttributes(transactionId, activeStep),
+            )
             val operations = prepareOperations(
                 transactionId,
                 plan,
                 downloadResult.artifacts.associateBy { it.artifactKey },
                 progressListener,
+            )
+            logger.info(
+                "install.step.after",
+                stepAttributes(
+                    transactionId,
+                    activeStep,
+                    attributes = mapOf("operations" to operations.size),
+                ),
             )
             val now = clock.currentTimeMillis()
             transaction = InstallTransaction(
@@ -90,9 +125,27 @@ class InstallWorker(
                 createdAtEpochMillis = now,
                 updatedAtEpochMillis = now,
             )
+            activeStep = "save_transaction"
+            logger.info(
+                "install.step.before",
+                stepAttributes(transactionId, activeStep),
+            )
             transaction = save(requireNotNull(transaction))
+            logger.info(
+                "install.step.after",
+                stepAttributes(transactionId, activeStep),
+            )
 
+            activeStep = "check_disk_space"
             val requiredBytes = requiredWorkingSpace(operations)
+            logger.info(
+                "install.step.before",
+                stepAttributes(
+                    transactionId,
+                    activeStep,
+                    attributes = mapOf("requiredBytes" to requiredBytes),
+                ),
+            )
             if (diskSpaceChecker.hasSufficientSpace(destination, requiredBytes) == false) {
                 throw InstallFailureException(
                     InstallFailure(
@@ -102,6 +155,11 @@ class InstallWorker(
                     ),
                 )
             }
+            logger.info(
+                "install.step.after",
+                stepAttributes(transactionId, activeStep),
+            )
+            activeStep = "execute_transaction"
             execute(requireNotNull(transaction), destination, progressListener)
         } catch (error: CancellationException) {
             transaction?.let { current ->
@@ -127,16 +185,18 @@ class InstallWorker(
                     progressListener,
                 )
             }
-        } catch (error: RuntimeException) {
+        } catch (error: Throwable) {
+            if (error is CancellationException) throw error
             logger.error(
                 "install.unexpected_failure",
-                mapOf("transactionId" to transactionId),
+                stepAttributes(transactionId, activeStep, activePath),
                 error,
             )
-            val failure = InstallFailure(
-                InstallFailureCode.INTERNAL,
-                "An unexpected installer failure occurred.",
-                recoverable = false,
+            val failure = unexpectedFailure(
+                error = error,
+                fallbackMessage = "An unexpected installer failure occurred.",
+                step = activeStep,
+                path = activePath,
             )
             val current = transaction
             if (current == null) {
@@ -214,11 +274,19 @@ class InstallWorker(
                 error.failure,
                 progressListener,
             )
-        } catch (error: RuntimeException) {
-            val failure = InstallFailure(
-                InstallFailureCode.INTERNAL,
-                "An unexpected installer failure occurred while resuming.",
-                recoverable = false,
+        } catch (error: Throwable) {
+            if (error is CancellationException) throw error
+            logger.error(
+                "install.resume_unexpected_failure",
+                stepAttributes(transactionId, "resume_transaction"),
+                error,
+            )
+            val failure = unexpectedFailure(
+                error = error,
+                fallbackMessage = "An unexpected installer failure occurred while resuming.",
+                step = "resume_transaction",
+                path = transaction.operations.getOrNull(transaction.checkpoint.operationIndex)
+                    ?.destinationPath,
             )
             rollbackAndFail(
                 latestTransaction(transaction),
@@ -235,6 +303,10 @@ class InstallWorker(
         progressListener: InstallProgressListener,
     ): InstallSessionResult {
         var transaction = initial
+        logger.info(
+            "install.step.before",
+            stepAttributes(transaction.id, "execute_transaction"),
+        )
         if (
             transaction.checkpoint.phase == InstallCheckpointPhase.PREPARED ||
             transaction.checkpoint.phase == InstallCheckpointPhase.STAGING
@@ -260,6 +332,10 @@ class InstallWorker(
         logger.info(
             "install.completed",
             mapOf("transactionId" to transaction.id, "files" to transaction.operations.size),
+        )
+        logger.info(
+            "install.step.after",
+            stepAttributes(transaction.id, "execute_transaction"),
         )
         return completed(transaction)
     }
@@ -299,13 +375,63 @@ class InstallWorker(
                 processedBytes,
                 totalBytes,
             )
-            copyAbsoluteSource(operation.sourcePath, destination, StoragePath(operation.stagePath))
-            verifyProviderFile(
-                destination,
-                StoragePath(operation.stagePath),
-                operation.expectedSizeBytes,
-                operation.expectedSha1,
-                operation.expectedSha512,
+            logger.info(
+                "install.step.before",
+                stepAttributes(
+                    transaction.id,
+                    "stage_copy",
+                    operation.destinationPath,
+                    mapOf("operationIndex" to index, "sourceType" to operation.sourceType),
+                ),
+            )
+            try {
+                copyAbsoluteSource(
+                    operation.sourcePath,
+                    destination,
+                    StoragePath(operation.stagePath),
+                )
+            } catch (error: Throwable) {
+                if (error is CancellationException || error is InstallFailureException) throw error
+                throw InstallStepException("stage_copy", operation.destinationPath, error)
+            }
+            logger.info(
+                "install.step.after",
+                stepAttributes(
+                    transaction.id,
+                    "stage_copy",
+                    operation.destinationPath,
+                    mapOf("operationIndex" to index),
+                ),
+            )
+            logger.info(
+                "install.step.before",
+                stepAttributes(
+                    transaction.id,
+                    "stage_verify",
+                    operation.destinationPath,
+                    mapOf("operationIndex" to index),
+                ),
+            )
+            try {
+                verifyProviderFile(
+                    destination,
+                    StoragePath(operation.stagePath),
+                    operation.expectedSizeBytes,
+                    operation.expectedSha1,
+                    operation.expectedSha512,
+                )
+            } catch (error: Throwable) {
+                if (error is CancellationException || error is InstallFailureException) throw error
+                throw InstallStepException("stage_verify", operation.destinationPath, error)
+            }
+            logger.info(
+                "install.step.after",
+                stepAttributes(
+                    transaction.id,
+                    "stage_verify",
+                    operation.destinationPath,
+                    mapOf("operationIndex" to index),
+                ),
             )
             processedBytes += operation.expectedSizeBytes
             transaction = save(
@@ -364,26 +490,85 @@ class InstallWorker(
 
             if (operation.state == InstallFileState.STAGED) {
                 val destinationPath = StoragePath(operation.destinationPath)
-                val existed = destination.exists(destinationPath).valueOrThrow()
+                logger.info(
+                    "install.step.before",
+                    stepAttributes(
+                        transaction.id,
+                        "commit_inspect_destination",
+                        operation.destinationPath,
+                        mapOf("operationIndex" to index),
+                    ),
+                )
+                val existed = try {
+                    destination.exists(destinationPath).valueOrThrow()
+                } catch (error: Throwable) {
+                    if (error is CancellationException || error is InstallFailureException) {
+                        throw error
+                    }
+                    throw InstallStepException(
+                        "commit_inspect_destination",
+                        operation.destinationPath,
+                        error,
+                    )
+                }
+                logger.info(
+                    "install.step.after",
+                    stepAttributes(
+                        transaction.id,
+                        "commit_inspect_destination",
+                        operation.destinationPath,
+                        mapOf("operationIndex" to index, "existed" to existed),
+                    ),
+                )
                 var originalSha512: String? = null
                 if (existed) {
-                    val originalHash = hashProviderFile(
-                        destination,
-                        destinationPath,
-                        setOf(StorageHashAlgorithm.SHA512),
+                    logger.info(
+                        "install.step.before",
+                        stepAttributes(
+                            transaction.id,
+                            "commit_backup",
+                            operation.destinationPath,
+                            mapOf("operationIndex" to index),
+                        ),
                     )
-                    originalSha512 = originalHash.hashes.getValue(StorageHashAlgorithm.SHA512)
-                    copyProviderFile(
-                        destination,
-                        destinationPath,
-                        StoragePath(operation.backupPath),
-                    )
-                    verifyProviderFile(
-                        destination,
-                        StoragePath(operation.backupPath),
-                        originalHash.sizeBytes,
-                        expectedSha1 = null,
-                        expectedSha512 = originalSha512,
+                    try {
+                        val originalHash = hashProviderFile(
+                            destination,
+                            destinationPath,
+                            setOf(StorageHashAlgorithm.SHA512),
+                        )
+                        originalSha512 =
+                            originalHash.hashes.getValue(StorageHashAlgorithm.SHA512)
+                        copyProviderFile(
+                            destination,
+                            destinationPath,
+                            StoragePath(operation.backupPath),
+                        )
+                        verifyProviderFile(
+                            destination,
+                            StoragePath(operation.backupPath),
+                            originalHash.sizeBytes,
+                            expectedSha1 = null,
+                            expectedSha512 = originalSha512,
+                        )
+                    } catch (error: Throwable) {
+                        if (error is CancellationException || error is InstallFailureException) {
+                            throw error
+                        }
+                        throw InstallStepException(
+                            "commit_backup",
+                            operation.destinationPath,
+                            error,
+                        )
+                    }
+                    logger.info(
+                        "install.step.after",
+                        stepAttributes(
+                            transaction.id,
+                            "commit_backup",
+                            operation.destinationPath,
+                            mapOf("operationIndex" to index),
+                        ),
                     )
                 }
                 operation = operation.copy(
@@ -402,17 +587,42 @@ class InstallWorker(
             }
 
             if (operation.state == InstallFileState.BACKED_UP) {
-                copyProviderFile(
-                    destination,
-                    StoragePath(operation.stagePath),
-                    StoragePath(operation.destinationPath),
+                logger.info(
+                    "install.step.before",
+                    stepAttributes(
+                        transaction.id,
+                        "commit_copy",
+                        operation.destinationPath,
+                        mapOf("operationIndex" to index),
+                    ),
                 )
-                verifyProviderFile(
-                    destination,
-                    StoragePath(operation.destinationPath),
-                    operation.expectedSizeBytes,
-                    operation.expectedSha1,
-                    operation.expectedSha512,
+                try {
+                    copyProviderFile(
+                        destination,
+                        StoragePath(operation.stagePath),
+                        StoragePath(operation.destinationPath),
+                    )
+                    verifyProviderFile(
+                        destination,
+                        StoragePath(operation.destinationPath),
+                        operation.expectedSizeBytes,
+                        operation.expectedSha1,
+                        operation.expectedSha512,
+                    )
+                } catch (error: Throwable) {
+                    if (error is CancellationException || error is InstallFailureException) {
+                        throw error
+                    }
+                    throw InstallStepException("commit_copy", operation.destinationPath, error)
+                }
+                logger.info(
+                    "install.step.after",
+                    stepAttributes(
+                        transaction.id,
+                        "commit_copy",
+                        operation.destinationPath,
+                        mapOf("operationIndex" to index),
+                    ),
                 )
                 installedBytes += operation.expectedSizeBytes
                 operation = operation.copy(state = InstallFileState.INSTALLED)
@@ -528,10 +738,16 @@ class InstallWorker(
             InstallRepositoryResult.Success(transaction)
         } catch (error: CancellationException) {
             throw error
-        } catch (error: RuntimeException) {
+        } catch (error: Throwable) {
+            if (error is CancellationException) throw error
             logger.error(
                 "install.rollback_failed",
-                mapOf("transactionId" to transaction.id),
+                stepAttributes(
+                    transaction.id,
+                    "rollback",
+                    transaction.operations.getOrNull(transaction.checkpoint.operationIndex)
+                        ?.destinationPath,
+                ),
                 error,
             )
             val rollbackFailure = rollbackFailure()
@@ -936,6 +1152,83 @@ class InstallWorker(
         failure = failure,
     )
 
+    private fun unexpectedFailure(
+        error: Throwable,
+        fallbackMessage: String,
+        step: String,
+        path: String?,
+    ): InstallFailure {
+        val stepError = error as? InstallStepException
+        val cause = stepError?.cause ?: error
+        val failingStep = stepError?.step ?: step
+        val failingPath = stepError?.path ?: path
+        val frame = cause.stackTrace.firstOrNull {
+            it.className.startsWith("com.modrith.")
+        } ?: cause.stackTrace.firstOrNull()
+        val details = if (includeExceptionDetails) {
+            buildMap {
+                put(
+                    "exceptionClass",
+                    cause::class.qualifiedName ?: cause::class.simpleName.orEmpty(),
+                )
+                put("exceptionMessage", cause.message.orEmpty())
+                put("failingMethod", frame?.methodName.orEmpty())
+                put("failingFile", frame?.fileName.orEmpty())
+                put("failingLine", frame?.lineNumber?.toString().orEmpty())
+                put("failingStep", failingStep)
+                failingPath?.let { put("failingPath", it) }
+                put("stackTrace", cause.stackTraceToString())
+            }
+        } else {
+            emptyMap()
+        }
+        val message = if (includeExceptionDetails) {
+            buildString {
+                append(cause::class.simpleName ?: "Throwable")
+                cause.message?.takeIf(String::isNotBlank)?.let {
+                    append(": ")
+                    append(it)
+                }
+                append(" in ")
+                append(frame?.methodName ?: failingStep)
+                frame?.fileName?.let {
+                    append(" (")
+                    append(it)
+                    if (frame.lineNumber > 0) {
+                        append(':')
+                        append(frame.lineNumber)
+                    }
+                    append(')')
+                }
+                failingPath?.let {
+                    append(" path=")
+                    append(it)
+                }
+            }
+        } else {
+            fallbackMessage
+        }
+        return InstallFailure(
+            InstallFailureCode.INTERNAL,
+            message,
+            recoverable = false,
+            path = failingPath,
+            details = details,
+        )
+    }
+
+    private fun stepAttributes(
+        transactionId: String,
+        step: String,
+        path: String? = null,
+        attributes: Map<String, Any?> = emptyMap(),
+    ): Map<String, Any?> = buildMap {
+        put("transactionId", transactionId)
+        put("step", step)
+        path?.let { put("path", it) }
+        putAll(attributes)
+    }
+
     private fun logEntry(
         event: String,
         path: String? = null,
@@ -1035,6 +1328,12 @@ class InstallWorker(
     private class InstallFailureException(
         val failure: InstallFailure,
     ) : RuntimeException(failure.message)
+
+    private class InstallStepException(
+        val step: String,
+        val path: String?,
+        cause: Throwable,
+    ) : RuntimeException(cause.message, cause)
 
     private companion object {
         const val WORKING_SPACE_MULTIPLIER = 2

@@ -47,6 +47,7 @@ data class InstallFailure(
     val message: String,
     val recoverable: Boolean,
     val path: String? = null,
+    val details: Map<String, String> = emptyMap(),
 )
 
 enum class InstallFailureCode {

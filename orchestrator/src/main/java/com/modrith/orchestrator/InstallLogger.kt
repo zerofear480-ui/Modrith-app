@@ -50,6 +50,7 @@ interface InstallLogger {
 class JvmInstallLogger(
     private val clock: () -> Long = System::currentTimeMillis,
     private val logger: Logger = Logger.getLogger("com.modrith.orchestrator"),
+    private val includeThrowableDetails: Boolean = false,
 ) : InstallLogger {
     private val sessions = ConcurrentHashMap<String, MutableStateFlow<List<InstallLogEntry>>>()
 
@@ -71,14 +72,18 @@ class JvmInstallLogger(
             attributes = safeAttributes,
         )
         sessions.getOrPut(sessionId) { MutableStateFlow(emptyList()) }.update { it + entry }
-        logger.log(
-            level.toJavaLevel(),
-            buildString {
-                append("$source $event ")
-                append(safeAttributes.entries.joinToString(prefix = "{", postfix = "}"))
+        val message = buildString {
+            append("$source $event ")
+            append(safeAttributes.entries.joinToString(prefix = "{", postfix = "}"))
+            if (!includeThrowableDetails) {
                 cause?.let { append(" cause=${it::class.simpleName ?: "unknown"}") }
-            },
-        )
+            }
+        }
+        if (cause != null && includeThrowableDetails) {
+            logger.log(level.toJavaLevel(), message, cause)
+        } else {
+            logger.log(level.toJavaLevel(), message)
+        }
     }
 
     override fun entries(sessionId: String): StateFlow<List<InstallLogEntry>> =

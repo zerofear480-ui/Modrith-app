@@ -19,6 +19,7 @@ class DefaultInstallEngine(
     diskSpaceChecker: InstallDiskSpaceChecker = InstallDiskSpaceChecker.UNKNOWN,
     logger: InstallLogger = JvmInstallLogger(),
     clock: InstallClock = SystemInstallClock,
+    includeExceptionDetails: Boolean = false,
 ) : InstallEngine {
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
     private val worker = InstallWorker(
@@ -26,6 +27,7 @@ class DefaultInstallEngine(
         diskSpaceChecker = diskSpaceChecker,
         logger = logger,
         clock = clock,
+        includeExceptionDetails = includeExceptionDetails,
     )
 
     override fun start(
